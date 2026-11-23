@@ -1879,7 +1879,7 @@
             <div id="admin-login-box" class="mt-4 rounded-xl border border-amber-400/40 bg-slate-900/90 p-5 text-center">
                 <div class="text-3xl mb-2">🛡️</div>
                 <h3 class="font-cinzel text-lg font-bold text-amber-200">VERIFIKASI AKSES ADMIN</h3>
-                <p class="text-xs text-slate-300 mt-1 mb-4">Masukkan kata sandi admin untuk mengelola soal atau masuk ke Ruang Pantau Arena. <span class="text-slate-400">(Default: <b>admin123</b>)</span></p>
+                <p class="text-xs text-slate-300 mt-1 mb-4">Masukkan kata sandi admin untuk mengelola soal atau masuk ke Ruang Pantau Arena. <span class="text-slate-400"></span></p>
                 <div class="max-w-xs mx-auto flex flex-col gap-2.5">
                     <input id="admin-password-input" type="password" placeholder="Masukkan Password Admin..." onkeydown="if(event.key==='Enter') verifyAdminPassword()"
                         class="w-full rounded-xl border border-amber-400/60 bg-slate-950 px-3.5 py-2.5 text-sm font-bold text-white outline-none focus:border-amber-300" />
@@ -11379,7 +11379,7 @@
         { cat: 'Informatika', q: 'Tag HTML untuk membuat tautan (hyperlink) adalah?', opts: ['<link>', '<a>', '<href>', '<url>'], ans: 1, exp: 'Tag <a> (anchor) digunakan untuk membuat hyperlink.' }
     ];
 
-    const ADMIN_PASSWORD = 'admin123';
+    const ADMIN_PASSWORD = 'anso123';
     const QUIZ_STORAGE_KEY = 'edu_legends_custom_questions_v1';
     let adminAuthenticated = false;
     let editingQuestionIdx = null;
