@@ -2754,7 +2754,7 @@
         updatePreviewHeroModel(id);
     }
 
-    // --- 2. LAZY WEB AUDIO API (REALISTIC EPIC WAR BGM & BATTLE SFX) ---
+    // --- 2. WEB AUDIO ENGINE v2 (mixer + reverb + musik berirama presisi + SFX berlapis) ---
     let soundOn = true;
     let audioCtx = null;
     let bgmTimer = null;
@@ -2762,84 +2762,71 @@
     let bgmMode = 'menu'; // 'menu' | 'battle' | 'quiz'
     let _noiseBuffer = null;
 
+    // Bus mixer: musik & SFX -> master -> kompresor -> speaker, plus reverb ruang
+    let masterBus = null, musicBus = null, sfxBus = null, reverbNode = null, _compNode = null;
+    const MUSIC_VOL = 0.5;
+    const SFX_VOL = 0.95;
+
     function getAudioNoiseBuffer(ctx) {
         if (_noiseBuffer && _noiseBuffer.sampleRate === ctx.sampleRate) return _noiseBuffer;
-        const len = ctx.sampleRate * 1.5;
+        const len = Math.floor(ctx.sampleRate * 1.5);
         const buf = ctx.createBuffer(1, len, ctx.sampleRate);
         const data = buf.getChannelData(0);
-        for (let i = 0; i < len; i++) {
-            data[i] = Math.random() * 2 - 1;
-        }
+        for (let i = 0; i < len; i++) data[i] = Math.random() * 2 - 1;
         _noiseBuffer = buf;
         return buf;
     }
 
-    function playFilteredNoise(ctx, now, duration, filterType, freqStart, freqEnd, qVal, gainPeak) {
-        const src = ctx.createBufferSource();
-        src.buffer = getAudioNoiseBuffer(ctx);
-        const filter = ctx.createBiquadFilter();
-        filter.type = filterType;
-        filter.frequency.setValueAtTime(freqStart, now);
-        if (freqEnd && freqEnd !== freqStart) {
-            filter.frequency.exponentialRampToValueAtTime(Math.max(20, freqEnd), now + duration);
+    function buildImpulseResponse(ctx, seconds, decay) {
+        const len = Math.floor(ctx.sampleRate * seconds);
+        const buf = ctx.createBuffer(2, len, ctx.sampleRate);
+        for (let ch = 0; ch < 2; ch++) {
+            const d = buf.getChannelData(ch);
+            for (let i = 0; i < len; i++) {
+                d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / len, decay);
+            }
         }
-        filter.Q.value = qVal || 1.0;
-
-        const gain = ctx.createGain();
-        gain.gain.setValueAtTime(0.001, now);
-        gain.gain.linearRampToValueAtTime(gainPeak, now + Math.min(0.02, duration * 0.2));
-        gain.gain.exponentialRampToValueAtTime(0.0008, now + duration);
-
-        src.connect(filter);
-        filter.connect(gain);
-        gain.connect(ctx.destination);
-        src.start(now);
-        src.stop(now + duration + 0.02);
+        return buf;
     }
 
-    function playWarTaikoHit(ctx, now, pitch = 92, volume = 0.24) {
-        const bodyOsc = ctx.createOscillator();
-        const bodyGain = ctx.createGain();
-        bodyOsc.type = 'sine';
-        bodyOsc.frequency.setValueAtTime(pitch * 1.45, now);
-        bodyOsc.frequency.exponentialRampToValueAtTime(pitch * 0.44, now + 0.34);
-        bodyGain.gain.setValueAtTime(0.001, now);
-        bodyGain.gain.linearRampToValueAtTime(volume, now + 0.012);
-        bodyGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.42);
-        bodyOsc.connect(bodyGain);
-        bodyGain.connect(ctx.destination);
-        bodyOsc.start(now);
-        bodyOsc.stop(now + 0.44);
+    function buildAudioGraph(ctx) {
+        try {
+            _compNode = ctx.createDynamicsCompressor();
+            _compNode.threshold.value = -16;
+            _compNode.knee.value = 18;
+            _compNode.ratio.value = 5;
+            _compNode.attack.value = 0.004;
+            _compNode.release.value = 0.2;
+            masterBus = ctx.createGain();
+            masterBus.gain.value = 0.9;
+            masterBus.connect(_compNode);
+            _compNode.connect(ctx.destination);
 
-        playFilteredNoise(ctx, now, 0.16, 'lowpass', 380, 95, 1.4, volume * 0.65);
-    }
+            musicBus = ctx.createGain();
+            musicBus.gain.value = MUSIC_VOL;
+            musicBus.connect(masterBus);
+            sfxBus = ctx.createGain();
+            sfxBus.gain.value = SFX_VOL;
+            sfxBus.connect(masterBus);
 
-    function playWarBrassHorn(ctx, now, freq, duration = 1.45, volume = 0.055) {
-        const filter = ctx.createBiquadFilter();
-        filter.type = 'lowpass';
-        filter.frequency.setValueAtTime(280, now);
-        filter.frequency.linearRampToValueAtTime(920, now + 0.28);
-        filter.frequency.exponentialRampToValueAtTime(340, now + duration);
-        filter.Q.value = 1.8;
-
-        const masterGain = ctx.createGain();
-        masterGain.gain.setValueAtTime(0.001, now);
-        masterGain.gain.linearRampToValueAtTime(volume, now + 0.18);
-        masterGain.gain.setValueAtTime(volume * 0.9, now + duration * 0.72);
-        masterGain.gain.exponentialRampToValueAtTime(0.0008, now + duration);
-
-        filter.connect(masterGain);
-        masterGain.connect(ctx.destination);
-
-        [-4, 0, 5].forEach(detuneCents => {
-            const osc = ctx.createOscillator();
-            osc.type = 'sawtooth';
-            osc.frequency.setValueAtTime(freq, now);
-            osc.detune.setValueAtTime(detuneCents, now);
-            osc.connect(filter);
-            osc.start(now);
-            osc.stop(now + duration + 0.03);
-        });
+            reverbNode = ctx.createConvolver();
+            reverbNode.buffer = buildImpulseResponse(ctx, 1.9, 2.6);
+            const revOut = ctx.createGain();
+            revOut.gain.value = 0.55;
+            reverbNode.connect(revOut);
+            revOut.connect(masterBus);
+            const musicSend = ctx.createGain();
+            musicSend.gain.value = 0.32;
+            musicBus.connect(musicSend);
+            musicSend.connect(reverbNode);
+            const sfxSend = ctx.createGain();
+            sfxSend.gain.value = 0.14;
+            sfxBus.connect(sfxSend);
+            sfxSend.connect(reverbNode);
+        } catch (err) {
+            masterBus = musicBus = sfxBus = ctx.destination;
+            reverbNode = null;
+        }
     }
 
     function ensureAudioCtx() {
@@ -2849,6 +2836,7 @@
                 const AudioCtx = window.AudioContext || window.webkitAudioContext;
                 if (!AudioCtx) return null;
                 audioCtx = new AudioCtx();
+                buildAudioGraph(audioCtx);
             }
             if (audioCtx.state === 'suspended') {
                 audioCtx.resume().catch(() => {});
@@ -2859,91 +2847,265 @@
         }
     }
 
-    function scheduleBgmTick() {
-        if (!soundOn || !audioCtx || audioCtx.state !== 'running') return;
-        const now = audioCtx.currentTime;
+    // ---- Blok bangunan suara ----
+    function aOsc(ctx, dest, type, f0, f1, t, dur, vol, att) {
+        const o = ctx.createOscillator();
+        const g = ctx.createGain();
+        o.type = type;
+        o.frequency.setValueAtTime(f0, t);
+        if (f1 && f1 !== f0) o.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(vol, t + (att || 0.004));
+        g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+        o.connect(g);
+        g.connect(dest);
+        o.start(t);
+        o.stop(t + dur + 0.03);
+    }
 
-        const progressions = {
-            menu: [
-                { bass: 73.42, horn: 146.83, strings: [293.66, 349.23, 440.00], ostinato: [293.66, 349.23, 440.00, 349.23] },
-                { bass: 58.27, horn: 116.54, strings: [233.08, 293.66, 349.23], ostinato: [233.08, 293.66, 349.23, 293.66] },
-                { bass: 65.41, horn: 130.81, strings: [261.63, 329.63, 392.00], ostinato: [261.63, 329.63, 392.00, 329.63] },
-                { bass: 55.00, horn: 110.00, strings: [220.00, 277.18, 329.63], ostinato: [220.00, 277.18, 329.63, 440.00] }
-            ],
-            battle: [
-                { bass: 73.42, horn: 146.83, strings: [293.66, 349.23, 440.00], ostinato: [293.66, 293.66, 349.23, 440.00, 349.23, 293.66, 329.63, 349.23] },
-                { bass: 58.27, horn: 116.54, strings: [233.08, 293.66, 349.23], ostinato: [233.08, 233.08, 293.66, 349.23, 392.00, 349.23, 293.66, 261.63] },
-                { bass: 65.41, horn: 130.81, strings: [261.63, 329.63, 392.00], ostinato: [261.63, 261.63, 329.63, 392.00, 440.00, 392.00, 329.63, 293.66] },
-                { bass: 55.00, horn: 110.00, strings: [220.00, 277.18, 329.63], ostinato: [220.00, 277.18, 329.63, 440.00, 493.88, 440.00, 329.63, 277.18] }
-            ],
-            quiz: [
-                { bass: 98.00, horn: 196.00, strings: [293.66, 392.00, 493.88], ostinato: [392.00, 493.88, 587.33, 493.88] },
-                { bass: 82.41, horn: 164.81, strings: [246.94, 329.63, 415.30], ostinato: [329.63, 415.30, 493.88, 415.30] }
-            ]
-        };
+    function aNoise(ctx, dest, t, dur, ftype, f0, f1, q, vol) {
+        const src = ctx.createBufferSource();
+        src.buffer = getAudioNoiseBuffer(ctx);
+        const filter = ctx.createBiquadFilter();
+        filter.type = ftype;
+        filter.frequency.setValueAtTime(f0, t);
+        if (f1 && f1 !== f0) filter.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+        filter.Q.value = q || 1;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.001, t);
+        g.gain.linearRampToValueAtTime(vol, t + Math.min(0.02, dur * 0.2));
+        g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+        src.connect(filter);
+        filter.connect(g);
+        g.connect(dest);
+        const maxOff = Math.max(0, 1.45 - dur);
+        src.start(t, Math.random() * maxOff);
+        src.stop(t + dur + 0.02);
+    }
 
-        const prog = progressions[bgmMode] || progressions.battle;
-        const barIdx = Math.floor(bgmStep / 8) % prog.length;
-        const subStep = bgmStep % 8;
-        const chord = prog[barIdx];
+    function aTaiko(ctx, dest, t, pitch, vol) {
+        aOsc(ctx, dest, 'sine', pitch * 1.45, pitch * 0.44, t, 0.42, vol, 0.012);
+        aNoise(ctx, dest, t, 0.16, 'lowpass', 380, 95, 1.4, vol * 0.65);
+    }
 
-        if (subStep === 0) {
-            playWarBrassHorn(audioCtx, now, chord.horn, bgmMode === 'battle' ? 1.85 : 1.6, bgmMode === 'battle' ? 0.052 : 0.036);
+    function aBrass(ctx, dest, t, freq, dur, vol) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(280, t);
+        filter.frequency.linearRampToValueAtTime(920, t + Math.min(0.28, dur * 0.4));
+        filter.frequency.exponentialRampToValueAtTime(340, t + dur);
+        filter.Q.value = 1.8;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.001, t);
+        g.gain.linearRampToValueAtTime(vol, t + Math.min(0.18, dur * 0.3));
+        g.gain.setValueAtTime(vol * 0.9, t + dur * 0.72);
+        g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+        filter.connect(g);
+        g.connect(dest);
+        [-4, 0, 5].forEach(cents => {
+            const o = ctx.createOscillator();
+            o.type = 'sawtooth';
+            o.frequency.setValueAtTime(freq, t);
+            o.detune.setValueAtTime(cents, t);
+            o.connect(filter);
+            o.start(t);
+            o.stop(t + dur + 0.03);
+        });
+    }
 
-            const strFilter = audioCtx.createBiquadFilter();
-            strFilter.type = 'lowpass';
-            strFilter.frequency.setValueAtTime(1150, now);
-            strFilter.connect(audioCtx.destination);
+    function aBell(ctx, dest, t, f, vol, decay) {
+        const d = decay || 0.5;
+        aOsc(ctx, dest, 'sine', f, 0, t, d, vol, 0.003);
+        aOsc(ctx, dest, 'sine', f * 2.76, 0, t, d * 0.45, vol * 0.35, 0.002);
+        aOsc(ctx, dest, 'triangle', f, 0, t, d * 0.6, vol * 0.3, 0.003);
+    }
 
-            chord.strings.forEach(freq => {
-                const sOsc = audioCtx.createOscillator();
-                const sGain = audioCtx.createGain();
-                sOsc.type = 'sawtooth';
-                sOsc.frequency.setValueAtTime(freq, now);
-                sGain.gain.setValueAtTime(0.001, now);
-                sGain.gain.linearRampToValueAtTime(0.011, now + 0.35);
-                sGain.gain.exponentialRampToValueAtTime(0.0008, now + 1.95);
-                sOsc.connect(sGain);
-                sGain.connect(strFilter);
-                sOsc.start(now);
-                sOsc.stop(now + 2.0);
+    function aPad(ctx, dest, t, freqs, dur, vol, cutoff) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.frequency.setValueAtTime(cutoff, t);
+        filter.connect(dest);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(vol, t + dur * 0.25);
+        g.gain.setValueAtTime(vol, t + dur * 0.65);
+        g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+        g.connect(filter);
+        freqs.forEach(fr => {
+            [-7, 7].forEach(cents => {
+                const o = ctx.createOscillator();
+                o.type = 'sawtooth';
+                o.frequency.setValueAtTime(fr, t);
+                o.detune.setValueAtTime(cents, t);
+                o.connect(g);
+                o.start(t);
+                o.stop(t + dur + 0.05);
+            });
+        });
+    }
+
+    function aLead(ctx, dest, t, f, dur, vol) {
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'lowpass';
+        filter.Q.value = 2;
+        filter.frequency.setValueAtTime(700, t);
+        filter.frequency.linearRampToValueAtTime(2600, t + 0.07);
+        filter.frequency.exponentialRampToValueAtTime(900, t + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.linearRampToValueAtTime(vol, t + 0.03);
+        g.gain.setValueAtTime(vol * 0.85, t + dur * 0.7);
+        g.gain.exponentialRampToValueAtTime(0.0008, t + dur);
+        filter.connect(g);
+        g.connect(dest);
+        [-8, 8].forEach(cents => {
+            const o = ctx.createOscillator();
+            o.type = 'sawtooth';
+            o.frequency.setValueAtTime(f, t);
+            o.detune.setValueAtTime(cents, t);
+            o.connect(filter);
+            o.start(t);
+            o.stop(t + dur + 0.03);
+        });
+    }
+
+    // ---- Musik: partitur (D minor, 4 bar) ----
+    const BGM_BPM = { menu: 76, battle: 128, quiz: 104 };
+    const BGM_PROG_MAIN = [
+        { b: 73.42, ch: [146.83, 174.61, 220.00, 293.66], str: [293.66, 349.23, 440.00] },
+        { b: 58.27, ch: [116.54, 146.83, 174.61, 233.08], str: [233.08, 293.66, 349.23] },
+        { b: 65.41, ch: [130.81, 164.81, 196.00, 261.63], str: [261.63, 329.63, 392.00] },
+        { b: 55.00, ch: [110.00, 138.59, 164.81, 220.00], str: [220.00, 277.18, 329.63] }
+    ];
+    const BGM_PROG_QUIZ = [
+        { b: 82.41, ch: [164.81, 196.00, 233.08, 329.63], str: [329.63, 392.00, 466.16] },
+        { b: 77.78, ch: [155.56, 196.00, 233.08, 311.13], str: [311.13, 392.00, 466.16] },
+        { b: 73.42, ch: [146.83, 174.61, 207.65, 293.66], str: [293.66, 349.23, 415.30] },
+        { b: 82.41, ch: [164.81, 207.65, 246.94, 329.63], str: [329.63, 415.30, 493.88] }
+    ];
+    // [langkah, frekuensi, panjang(langkah)] per bar
+    const BGM_MELODY = [
+        [[0, 587.33, 3], [3, 523.25, 1], [4, 587.33, 4], [8, 698.46, 4], [12, 587.33, 4]],
+        [[0, 523.25, 3], [3, 466.16, 1], [4, 523.25, 4], [8, 587.33, 4], [12, 523.25, 4]],
+        [[0, 659.25, 3], [3, 587.33, 1], [4, 523.25, 4], [8, 659.25, 4], [12, 783.99, 4]],
+        [[0, 698.46, 3], [3, 659.25, 1], [4, 554.37, 4], [8, 659.25, 4], [12, 880.00, 4]]
+    ];
+    let _bgmNextTime = 0;
+    let _bgmLastMode = null;
+
+    function _playerLowHp() {
+        try { return typeof player !== 'undefined' && player && !player.isDead && player.maxHp > 0 && player.hp / player.maxHp < 0.3; } catch (e) { return false; }
+    }
+    function _matchIntensity() {
+        try { return typeof matchTime === 'number' ? (matchTime > 420 ? 2 : (matchTime > 180 ? 1 : 0)) : 0; } catch (e) { return 0; }
+    }
+
+    function scheduleMusicStep(step, t) {
+        const ctx = audioCtx;
+        const dest = musicBus;
+        const mode = bgmMode;
+        const bar = Math.floor(step / 16) % 4;
+        const s = step % 16;
+        const stepDur = 60 / (BGM_BPM[mode] || 120) / 4;
+
+        if (mode === 'battle') {
+            const c = BGM_PROG_MAIN[bar];
+            const lvl = _matchIntensity();
+            if (s % 2 === 0) aOsc(ctx, dest, 'sawtooth', (s % 8 === 6 ? c.b * 2 : c.b), 0, t, stepDur * 1.9, 0.07, 0.006);
+            if (s === 0 || s === 8) aTaiko(ctx, dest, t, s === 0 ? 84 : 78, 0.22);
+            if (s === 4 || s === 12) {
+                aNoise(ctx, dest, t, 0.13, 'bandpass', 1900, 1200, 1.1, 0.09);
+                aTaiko(ctx, dest, t, 112, 0.09);
+            }
+            if (s === 10 || s === 14) aTaiko(ctx, dest, t, 118, 0.09);
+            if (s % 2 === 0 || lvl >= 1) aNoise(ctx, dest, t, 0.05, 'highpass', 6500, 5500, 0.8, s % 4 === 0 ? 0.03 : 0.016);
+            if (s % 2 === 0) aOsc(ctx, dest, 'sawtooth', c.ch[(s / 2) % 4] * 2, 0, t, stepDur * 1.4, 0.016, 0.004);
+            if (s === 0) {
+                aBrass(ctx, dest, t, c.ch[0] * 2, stepDur * 15, 0.052);
+                aPad(ctx, dest, t, c.str, stepDur * 16, 0.011, 1150);
+                if (bar === 0) aNoise(ctx, dest, t, 1.1, 'highpass', 5200, 2600, 0.7, 0.045);
+            }
+            BGM_MELODY[bar].forEach(n => {
+                if (n[0] === s) aLead(ctx, dest, t, n[1], stepDur * n[2] * 0.95, lvl >= 1 ? 0.034 : 0.026);
+            });
+            if (_playerLowHp() && (s === 0 || s === 3 || s === 8 || s === 11)) {
+                aOsc(ctx, dest, 'sine', 62, 38, t, 0.22, s % 8 === 0 ? 0.2 : 0.13, 0.008);
+            }
+        } else if (mode === 'quiz') {
+            const c = BGM_PROG_QUIZ[bar % BGM_PROG_QUIZ.length];
+            const urgent = (typeof quizTimer === 'number' && quizTimer < 4);
+            if (s % 4 === 0 || (urgent && s % 2 === 0)) {
+                aNoise(ctx, dest, t, 0.035, 'bandpass', 3000, 2600, 3, urgent ? 0.07 : 0.05);
+                aOsc(ctx, dest, 'sine', 1800, 1300, t, 0.04, urgent ? 0.045 : 0.03, 0.002);
+            }
+            if (s === 0 || s === 3 || s === 6 || s === 8 || s === 11 || s === 14) {
+                aOsc(ctx, dest, 'sawtooth', c.b, 0, t, stepDur * 1.5, 0.06, 0.006);
+            }
+            if (s === 0) aPad(ctx, dest, t, c.str, stepDur * 16, 0.012, 900);
+            if (s === 0 || s === 8) aTaiko(ctx, dest, t, 70, urgent ? 0.2 : 0.11);
+            if (urgent && (s === 4 || s === 12)) aTaiko(ctx, dest, t, 96, 0.1);
+            if (s % 4 === 2) aBell(ctx, dest, t, c.ch[(s / 4 | 0) % 4] * 4, 0.014, 0.4);
+        } else {
+            // menu: tenang, megah, berambient
+            const c = BGM_PROG_MAIN[bar];
+            if (s === 0) {
+                aPad(ctx, dest, t, c.str, stepDur * 16, 0.013, 1000);
+                aPad(ctx, dest, t, [c.ch[0], c.ch[2]], stepDur * 16, 0.012, 700);
+                if (bar % 2 === 0) aBrass(ctx, dest, t, c.ch[0] * 2, stepDur * 14, 0.03);
+            }
+            if (s % 2 === 0) aBell(ctx, dest, t, c.ch[(s / 2) % 4] * 2, 0.035, 0.9);
+            if (s === 0 || s === 8) aTaiko(ctx, dest, t, 76, s === 0 ? 0.13 : 0.08);
+            BGM_MELODY[bar].forEach(n => {
+                if (n[0] === s) aBell(ctx, dest, t, n[1], 0.05, 0.4 + n[2] * stepDur);
             });
         }
+    }
 
-        const ostFreq = chord.ostinato[subStep % chord.ostinato.length];
-        const ostOsc = audioCtx.createOscillator();
-        const ostFilter = audioCtx.createBiquadFilter();
-        const ostGain = audioCtx.createGain();
-        ostOsc.type = 'sawtooth';
-        ostOsc.frequency.setValueAtTime(ostFreq, now);
-        ostFilter.type = 'bandpass';
-        ostFilter.frequency.setValueAtTime(ostFreq * 2.2, now);
-        ostFilter.Q.value = 1.6;
-        ostGain.gain.setValueAtTime(0.001, now);
-        ostGain.gain.linearRampToValueAtTime(bgmMode === 'battle' ? 0.024 : 0.015, now + 0.025);
-        ostGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.22);
-        ostOsc.connect(ostFilter);
-        ostFilter.connect(ostGain);
-        ostGain.connect(audioCtx.destination);
-        ostOsc.start(now);
-        ostOsc.stop(now + 0.24);
+    function _fadeMusicIn() {
+        try {
+            if (!musicBus || !audioCtx || musicBus === audioCtx.destination) return;
+            const g = musicBus.gain;
+            const t = audioCtx.currentTime;
+            g.cancelScheduledValues(t);
+            g.setValueAtTime(0.0001, t);
+            g.linearRampToValueAtTime(MUSIC_VOL, t + 0.9);
+        } catch (e) {}
+    }
 
-        if (bgmMode === 'battle') {
-            if (subStep === 0 || subStep === 4) {
-                playWarTaikoHit(audioCtx, now, subStep === 0 ? 86 : 78, 0.24);
-            } else if (subStep === 3 || subStep === 6 || subStep === 7) {
-                playWarTaikoHit(audioCtx, now, 118, subStep === 7 ? 0.16 : 0.12);
-            }
-            if (subStep === 2 || subStep === 6) {
-                playFilteredNoise(audioCtx, now, 0.14, 'highpass', 3200, 1800, 1.2, 0.032);
-            }
-        } else {
-            if (subStep === 0 || subStep === 4) {
-                playWarTaikoHit(audioCtx, now, 76, 0.12);
-            }
-        }
+    // Musik merunduk sebentar saat efek besar (ultimate, tower runtuh, fanfare)
+    function duckMusic(level, hold, release) {
+        try {
+            if (!musicBus || !audioCtx || musicBus === audioCtx.destination) return;
+            const g = musicBus.gain;
+            const t = audioCtx.currentTime;
+            const low = MUSIC_VOL * level;
+            g.cancelScheduledValues(t);
+            g.setValueAtTime(Math.max(0.0001, g.value), t);
+            g.linearRampToValueAtTime(low, t + 0.04);
+            g.setValueAtTime(low, t + 0.04 + hold);
+            g.linearRampToValueAtTime(MUSIC_VOL, t + 0.04 + hold + release);
+        } catch (e) {}
+    }
 
-        bgmStep++;
+    // Penjadwal dengan look-ahead: ritme tetap rapi walau frame game sedang berat
+    function bgmTick() {
+        if (!soundOn || !audioCtx || audioCtx.state !== 'running') return;
+        try {
+            const ctx = audioCtx;
+            if (_bgmLastMode !== bgmMode) {
+                _bgmLastMode = bgmMode;
+                bgmStep = 0;
+                _bgmNextTime = Math.max(_bgmNextTime, ctx.currentTime + 0.06);
+                _fadeMusicIn();
+            }
+            if (_bgmNextTime < ctx.currentTime - 0.15) _bgmNextTime = ctx.currentTime + 0.05;
+            let guard = 0;
+            while (_bgmNextTime < ctx.currentTime + 0.3 && guard++ < 16) {
+                scheduleMusicStep(bgmStep, _bgmNextTime);
+                _bgmNextTime += 60 / (BGM_BPM[bgmMode] || 120) / 4;
+                bgmStep++;
+            }
+        } catch (err) {}
     }
 
     function startBgm(mode = 'battle') {
@@ -2953,8 +3115,10 @@
         if (!ctx) return;
         if (bgmTimer) return;
         bgmStep = 0;
-        scheduleBgmTick();
-        bgmTimer = setInterval(scheduleBgmTick, 260);
+        _bgmLastMode = null;
+        _bgmNextTime = ctx.currentTime + 0.08;
+        bgmTick();
+        bgmTimer = setInterval(bgmTick, 60);
     }
 
     function stopBgm() {
@@ -3000,132 +3164,226 @@
     document.addEventListener('fullscreenchange', syncFullscreenIcon);
     document.addEventListener('webkitfullscreenchange', syncFullscreenIcon);
 
-    function playSfx(type) {
-        if (!soundOn) return;
+    // ---- SFX: berlapis, berposisi (stereo + jarak), bervariasi, dengan batas suara ----
+    const SFX_MIN_GAP_MS = { atk: 40, bow: 40, hit: 45, hurt: 180, minion: 60, creep: 80, tick: 0 };
+    const SFX_CRITICAL = { ultimate: 1, towerfall: 1, win: 1, fail: 1, levelup: 1, quiz: 1, herodeath: 1, correct: 1, wrong: 1, respawn: 1 };
+    const SFX_UI = { select: 1, shop: 1, gold: 1, banner: 1, tick: 1 };
+    const _sfxLastAt = {};
+    let _sfxActive = 0;
+
+    // Posisi dunia -> {pan, vol}; null = terlalu jauh untuk terdengar
+    function sfxSpatialize(pos) {
+        try {
+            if (!pos || typeof camera === 'undefined' || !camera) return { pan: 0, vol: 1 };
+            const off = (typeof cameraOffset !== 'undefined' && cameraOffset) ? cameraOffset : { x: 0, z: 230 };
+            const tx = camera.position.x - off.x;
+            const tz = camera.position.z - off.z;
+            const dx = pos.x - tx;
+            const dz = pos.z - tz;
+            const dist = Math.sqrt(dx * dx + dz * dz);
+            const vol = Math.pow(Math.max(0, 1 - dist / 1150), 1.25);
+            if (vol < 0.04) return null;
+            return { pan: Math.max(-0.85, Math.min(0.85, dx / 520)), vol: Math.max(0.12, vol) };
+        } catch (e) {
+            return { pan: 0, vol: 1 };
+        }
+    }
+
+    function playSfx(type, pos) {
+        if (!soundOn || !type) return;
         const ctx = ensureAudioCtx();
-        if (!ctx) return;
+        if (!ctx || !sfxBus) return;
+        if (ctx.state !== 'running' && !SFX_UI[type]) return;
+
+        let vol = 1, pan = 0;
+        if (pos) {
+            const sp = sfxSpatialize(pos);
+            if (!sp) return;
+            vol = sp.vol;
+            pan = sp.pan;
+        }
+        const nowMs = performance.now();
+        const gap = SFX_MIN_GAP_MS[type] || 0;
+        if (gap && _sfxLastAt[type] && nowMs - _sfxLastAt[type] < gap) return;
+        if (_sfxActive >= 14 && !SFX_CRITICAL[type]) return;
+        _sfxLastAt[type] = nowMs;
+        _sfxActive++;
+        setTimeout(() => { _sfxActive = Math.max(0, _sfxActive - 1); }, 450);
 
         try {
-            const now = ctx.currentTime;
-            if (type === 'atk') {
-                playFilteredNoise(ctx, now, 0.16, 'bandpass', 1900, 520, 2.2, 0.24);
-                const ring = ctx.createOscillator();
-                const rGain = ctx.createGain();
-                ring.type = 'triangle';
-                ring.frequency.setValueAtTime(1180, now);
-                ring.frequency.exponentialRampToValueAtTime(640, now + 0.14);
-                rGain.gain.setValueAtTime(0.08, now);
-                rGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-                ring.connect(rGain);
-                rGain.connect(ctx.destination);
-                ring.start(now);
-                ring.stop(now + 0.16);
-            } else if (type === 'bow') {
-                playFilteredNoise(ctx, now, 0.17, 'bandpass', 2600, 950, 2.4, 0.20);
-                const twang = ctx.createOscillator();
-                const tGain = ctx.createGain();
-                twang.type = 'triangle';
-                twang.frequency.setValueAtTime(340, now);
-                twang.frequency.exponentialRampToValueAtTime(145, now + 0.14);
-                tGain.gain.setValueAtTime(0.16, now);
-                tGain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
-                twang.connect(tGain);
-                tGain.connect(ctx.destination);
-                twang.start(now);
-                twang.stop(now + 0.16);
-            } else if (type === 'slam') {
-                playWarTaikoHit(ctx, now, 68, 0.32);
-                playFilteredNoise(ctx, now, 0.28, 'lowpass', 620, 85, 1.1, 0.26);
-            } else if (type === 'hit') {
-                playFilteredNoise(ctx, now, 0.12, 'bandpass', 1250, 320, 1.5, 0.24);
-                const thud = ctx.createOscillator();
-                const thGain = ctx.createGain();
-                thud.type = 'sawtooth';
-                thud.frequency.setValueAtTime(165, now);
-                thud.frequency.exponentialRampToValueAtTime(52, now + 0.11);
-                thGain.gain.setValueAtTime(0.16, now);
-                thGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
-                thud.connect(thGain);
-                thGain.connect(ctx.destination);
-                thud.start(now);
-                thud.stop(now + 0.13);
-            } else if (type === 'skill') {
-                playFilteredNoise(ctx, now, 0.28, 'bandpass', 900, 2400, 2.0, 0.22);
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.type = 'sawtooth';
-                osc.frequency.setValueAtTime(280, now);
-                osc.frequency.exponentialRampToValueAtTime(980, now + 0.26);
-                gain.gain.setValueAtTime(0.16, now);
-                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.start(now);
-                osc.stop(now + 0.29);
-            } else if (type === 'ultimate') {
-                playWarTaikoHit(ctx, now, 58, 0.36);
-                playFilteredNoise(ctx, now, 0.52, 'lowpass', 1600, 110, 1.2, 0.30);
-                playWarBrassHorn(ctx, now, 146.83, 0.55, 0.14);
-            } else if (type === 'gold') {
-                [1318.51, 1760.0].forEach((freq, i) => {
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
-                    osc.type = 'sine';
-                    osc.frequency.setValueAtTime(freq, now + i * 0.055);
-                    gain.gain.setValueAtTime(0.12, now + i * 0.055);
-                    gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.055 + 0.22);
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    osc.start(now + i * 0.055);
-                    osc.stop(now + i * 0.055 + 0.23);
-                });
-            } else if (type === 'levelup') {
-                playWarBrassHorn(ctx, now, 293.66, 0.45, 0.11);
-                [440, 554.37, 659.25, 880].forEach((freq, i) => {
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
-                    osc.type = 'triangle';
-                    osc.frequency.setValueAtTime(freq, now + i * 0.08);
-                    gain.gain.setValueAtTime(0.16, now + i * 0.08);
-                    gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.28);
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    osc.start(now + i * 0.08);
-                    osc.stop(now + i * 0.08 + 0.3);
-                });
-            } else if (type === 'select' || type === 'shop') {
-                playFilteredNoise(ctx, now, 0.09, 'bandpass', 2200, 1400, 3.0, 0.11);
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.type = 'triangle';
-                osc.frequency.setValueAtTime(587.33, now);
-                osc.frequency.setValueAtTime(880, now + 0.05);
-                gain.gain.setValueAtTime(0.11, now);
-                gain.gain.exponentialRampToValueAtTime(0.001, now + 0.16);
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.start(now);
-                osc.stop(now + 0.17);
-            } else if (type === 'quiz') {
-                playWarBrassHorn(ctx, now, 220.0, 0.48, 0.12);
-            } else if (type === 'win') {
-                playWarTaikoHit(ctx, now, 84, 0.26);
-                playWarBrassHorn(ctx, now, 293.66, 0.72, 0.14);
-                [587.33, 739.99, 880.0, 1174.66].forEach((freq, i) => {
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
-                    osc.type = 'triangle';
-                    osc.frequency.setValueAtTime(freq, now + i * 0.11);
-                    gain.gain.setValueAtTime(0.16, now + i * 0.11);
-                    gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.11 + 0.35);
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    osc.start(now + i * 0.11);
-                    osc.stop(now + i * 0.11 + 0.36);
-                });
-            } else if (type === 'fail') {
-                playWarTaikoHit(ctx, now, 62, 0.28);
-                playWarBrassHorn(ctx, now, 110.0, 0.65, 0.14);
+            const t = ctx.currentTime + 0.005;
+            const out = ctx.createGain();
+            out.gain.value = vol;
+            if (ctx.createStereoPanner && pan !== 0) {
+                const p = ctx.createStereoPanner();
+                p.pan.value = pan;
+                out.connect(p);
+                p.connect(sfxBus);
+            } else {
+                out.connect(sfxBus);
+            }
+            const wet = (w) => {
+                if (!reverbNode) return;
+                const wg = ctx.createGain();
+                wg.gain.value = w;
+                out.connect(wg);
+                wg.connect(reverbNode);
+            };
+            const r = 1 + (Math.random() - 0.5) * 0.14;
+            const O = (ty, f0, f1, tt, d, v, a) => aOsc(ctx, out, ty, f0, f1, tt, d, v, a);
+            const N = (tt, d, ft, f0, f1, q, v) => aNoise(ctx, out, tt, d, ft, f0, f1, q, v);
+
+            switch (type) {
+                case 'atk':
+                    N(t, 0.17, 'bandpass', 2600 * r, 650, 2.0, 0.26);
+                    O('triangle', 1250 * r, 700 * r, t, 0.16, 0.07);
+                    O('triangle', 1870 * r, 1100 * r, t + 0.005, 0.12, 0.04);
+                    O('sine', 150, 70, t, 0.1, 0.09);
+                    break;
+                case 'bow':
+                    N(t, 0.14, 'bandpass', 3200 * r, 900, 2.2, 0.18);
+                    O('triangle', 380 * r, 150, t, 0.16, 0.14);
+                    O('sine', 2400, 1200, t, 0.05, 0.04);
+                    break;
+                case 'slam':
+                    aTaiko(ctx, out, t, 66, 0.3);
+                    O('sine', 78, 32, t, 0.55, 0.34, 0.01);
+                    N(t, 0.45, 'lowpass', 700, 80, 1.1, 0.28);
+                    N(t + 0.05, 0.25, 'highpass', 2500, 1800, 0.8, 0.08);
+                    wet(0.3);
+                    break;
+                case 'hit':
+                    N(t, 0.11, 'bandpass', 1400 * r, 300, 1.5, 0.22);
+                    O('sawtooth', 170 * r, 50, t, 0.12, 0.15);
+                    O('square', 2200, 1500, t, 0.03, 0.04);
+                    break;
+                case 'hurt':
+                    N(t, 0.14, 'lowpass', 900, 200, 1.2, 0.2);
+                    O('sine', 130 * r, 60, t, 0.16, 0.2, 0.006);
+                    break;
+                case 'skill': {
+                    N(t, 0.3, 'bandpass', 700, 3000, 2.0, 0.2);
+                    O('sawtooth', 260 * r, 1050, t, 0.28, 0.1);
+                    const pent = [1318.5, 1568, 1760, 2093];
+                    for (let i = 0; i < 3; i++) aBell(ctx, out, t + 0.1 + i * 0.05, pent[(Math.random() * 4) | 0], 0.05, 0.3);
+                    wet(0.35);
+                    break;
+                }
+                case 'ultimate':
+                    duckMusic(0.35, 0.5, 0.9);
+                    aTaiko(ctx, out, t, 56, 0.36);
+                    O('sine', 60, 28, t, 0.8, 0.4, 0.01);
+                    N(t, 0.7, 'lowpass', 1800, 90, 1.2, 0.3);
+                    aBrass(ctx, out, t, 146.83, 0.85, 0.13);
+                    aBrass(ctx, out, t, 220.0, 0.85, 0.08);
+                    N(t, 0.5, 'highpass', 600, 5000, 0.9, 0.08);
+                    aPad(ctx, out, t, [293.66, 369.99, 440.0], 1.0, 0.03, 900);
+                    for (let i = 0; i < 4; i++) aBell(ctx, out, t + 0.25 + i * 0.06, 1760 * (1 + i * 0.25), 0.04, 0.4);
+                    wet(0.5);
+                    break;
+                case 'gold':
+                    [1318.5, 1975.5, 2637].forEach((f, i) => aBell(ctx, out, t + i * 0.05, f * r, 0.08, 0.28));
+                    break;
+                case 'levelup':
+                    duckMusic(0.6, 0.4, 0.6);
+                    aBrass(ctx, out, t, 293.66, 0.5, 0.1);
+                    [440, 554.37, 659.25, 880, 1108.7].forEach((f, i) => aBell(ctx, out, t + i * 0.07, f, 0.12, 0.45));
+                    N(t + 0.15, 0.4, 'highpass', 5000, 7000, 0.8, 0.04);
+                    wet(0.4);
+                    break;
+                case 'select':
+                    N(t, 0.03, 'highpass', 4000, 5000, 0.8, 0.08);
+                    O('triangle', 660, 990, t, 0.09, 0.1);
+                    break;
+                case 'shop':
+                    [1568, 2093, 2637, 3136].forEach((f, i) => aBell(ctx, out, t + i * 0.045, f, 0.07, 0.25));
+                    N(t, 0.05, 'highpass', 5000, 6000, 0.8, 0.06);
+                    break;
+                case 'quiz':
+                    duckMusic(0.4, 0.9, 0.9);
+                    aTaiko(ctx, out, t, 70, 0.3);
+                    aTaiko(ctx, out, t + 0.22, 62, 0.3);
+                    aBrass(ctx, out, t, 220.0, 0.7, 0.12);
+                    aBrass(ctx, out, t, 164.81, 0.7, 0.09);
+                    N(t, 0.6, 'highpass', 400, 3000, 0.9, 0.07);
+                    wet(0.35);
+                    break;
+                case 'correct':
+                    duckMusic(0.5, 0.5, 0.7);
+                    aBrass(ctx, out, t, 293.66, 0.35, 0.08);
+                    [659.25, 830.6, 987.8, 1318.5].forEach((f, i) => aBell(ctx, out, t + i * 0.07, f, 0.12, 0.45));
+                    N(t + 0.2, 0.35, 'highpass', 5500, 7500, 0.8, 0.04);
+                    wet(0.4);
+                    break;
+                case 'wrong':
+                    duckMusic(0.5, 0.5, 0.7);
+                    aTaiko(ctx, out, t, 62, 0.22);
+                    O('sawtooth', 110, 78, t, 0.5, 0.11);
+                    O('sawtooth', 116, 80, t, 0.5, 0.09);
+                    aBrass(ctx, out, t + 0.05, 146.83, 0.5, 0.07);
+                    wet(0.25);
+                    break;
+                case 'win':
+                    duckMusic(0.45, 1.5, 1.0);
+                    aTaiko(ctx, out, t, 84, 0.26);
+                    aBrass(ctx, out, t, 293.66, 0.45, 0.12);
+                    aBrass(ctx, out, t + 0.28, 369.99, 0.45, 0.12);
+                    aBrass(ctx, out, t + 0.56, 440.0, 1.0, 0.13);
+                    [587.33, 739.99, 880.0, 1174.66].forEach((f, i) => aBell(ctx, out, t + 0.15 + i * 0.11, f, 0.12, 0.5));
+                    N(t + 0.56, 1.1, 'highpass', 5200, 2600, 0.7, 0.08);
+                    wet(0.45);
+                    break;
+                case 'fail':
+                    duckMusic(0.45, 1.2, 1.0);
+                    aTaiko(ctx, out, t, 62, 0.28);
+                    aBrass(ctx, out, t, 220.0, 0.5, 0.12);
+                    aBrass(ctx, out, t + 0.4, 196.0, 0.5, 0.12);
+                    aBrass(ctx, out, t + 0.8, 164.81, 0.9, 0.13);
+                    wet(0.4);
+                    break;
+                case 'towerfall':
+                    duckMusic(0.3, 1.0, 1.1);
+                    O('sine', 55, 24, t, 1.0, 0.5, 0.01);
+                    aTaiko(ctx, out, t, 58, 0.34);
+                    aTaiko(ctx, out, t + 0.28, 52, 0.28);
+                    N(t, 1.1, 'lowpass', 1200, 60, 1.1, 0.38);
+                    for (let i = 0; i < 7; i++) N(t + 0.1 + i * 0.11 + Math.random() * 0.05, 0.14, 'highpass', 2600 + Math.random() * 1500, 1800, 0.8, 0.06);
+                    aBrass(ctx, out, t + 0.1, 146.83, 0.9, 0.1);
+                    [1318.5, 1760, 2093].forEach((f, i) => aBell(ctx, out, t + 0.5 + i * 0.07, f, 0.07, 0.5));
+                    wet(0.5);
+                    break;
+                case 'minion':
+                    O('sine', 380 * r, 120, t, 0.09, 0.08, 0.003);
+                    N(t, 0.07, 'bandpass', 1800 * r, 600, 1.4, 0.08);
+                    break;
+                case 'creep':
+                    O('sawtooth', 140 * r, 45, t, 0.25, 0.16);
+                    O('square', 90, 60, t, 0.2, 0.05);
+                    N(t, 0.22, 'lowpass', 900, 150, 1.2, 0.2);
+                    break;
+                case 'herodeath':
+                    aTaiko(ctx, out, t, 64, 0.26);
+                    O('sine', 200, 50, t, 0.5, 0.2, 0.008);
+                    N(t, 0.45, 'lowpass', 1500, 100, 1.1, 0.24);
+                    aBrass(ctx, out, t, 110.0, 0.6, 0.08);
+                    wet(0.3);
+                    break;
+                case 'respawn':
+                    [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => aBell(ctx, out, t + i * 0.08, f, 0.1, 0.45));
+                    N(t, 0.3, 'bandpass', 800, 3200, 1.5, 0.08);
+                    aBrass(ctx, out, t, 196.0, 0.45, 0.07);
+                    wet(0.4);
+                    break;
+                case 'tick':
+                    O('sine', 1800, 1200, t, 0.04, 0.09, 0.002);
+                    N(t, 0.03, 'bandpass', 3000, 2600, 3, 0.08);
+                    break;
+                case 'banner':
+                    aBell(ctx, out, t, 880, 0.045, 0.5);
+                    aBell(ctx, out, t + 0.06, 1318.5, 0.04, 0.5);
+                    break;
+                default:
+                    break;
             }
         } catch (err) {}
     }
@@ -7080,6 +7338,7 @@
     function showBanner(text, color) {
         const el = document.getElementById('banner-msg');
         if (!el) return;
+        playSfx('banner');
         el.innerText = text;
         el.style.color = color;
         el.style.opacity = 1;
@@ -7232,6 +7491,7 @@
         }
         die() {
             this.isDead = true;
+            playSfx(this instanceof Tower ? null : (this instanceof JungleCreep ? 'creep' : 'minion'), this.group.position);
             scene.remove(this.group);
             disposeGeometries(this.group);
             this.hpWrap.remove();
@@ -7399,6 +7659,7 @@
         takeDamage(dmg, source) {
             if (this.shieldTimer > 0) dmg *= 0.45;
             super.takeDamage(dmg, source);
+            if (this.isPlayer && !this.isDead && dmg > 0) playSfx('hurt');
         }
 
         die(source) {
@@ -7408,6 +7669,7 @@
             if (this.lbl) this.lbl.style.display = 'none';
             if (this.overheadBadge) this.overheadBadge.style.display = 'none';
             this.respawnTimer = 6;
+            playSfx('herodeath', this.group.position);
             spawnBurst(this.group.position, this.team === 'blue' ? 0x1e90ff : 0xff3b30, 28);
 
             const myTeam = player ? player.team : 'blue';
@@ -7575,8 +7837,8 @@
             const spawnPos = this.group.position.clone().addScaledVector(dir, 14);
             projectiles.push(new Projectile(spawnPos, dir, this.archetype === 'kael' ? 375 : 310, this.atkDmg, this.team, this, false, neonHex, projKind));
 
+            playSfx(projKind === 'arrow' ? 'bow' : (vfxKind === 'slam' ? 'slam' : 'atk'), this.isPlayer ? undefined : this.group.position);
             if (this.isPlayer) {
-                playSfx(projKind === 'arrow' ? 'bow' : (vfxKind === 'slam' ? 'slam' : 'atk'));
                 if (window.CloudNet && window.CloudNet.roomId && window.mpSendCombatEvent) {
                     window.mpSendCombatEvent({
                         type: 'attack',
@@ -7644,6 +7906,7 @@
                     this.group.visible = true;
                     const spawn = this.team === 'blue' ? [-940, 940] : [940, -940];
                     this.group.position.set(spawn[0], 0, spawn[1]);
+                    playSfx('respawn', this.group.position);
                 }
                 return;
             }
@@ -7969,9 +8232,13 @@
     }
 
     class Minion extends Entity {
-        constructor(x, z, team, isRanged = false) {
+        constructor(x, z, team, isRanged = false, laneKey = null) {
             super(x, z, isRanged ? 195 : 255, team);
             this.isRanged = isRanged;
+            this.laneKey = laneKey;
+            this.route = getLaneRoute(laneKey, team);
+            this.routeIdx = 0;
+            this._goal = new THREE.Vector3();
             this.speed = isRanged ? 76 : 86;
             this.atkRange = isRanged ? 115 : 54;
             this.atkDmg = isRanged ? 28 : 24;
@@ -7995,6 +8262,26 @@
         die(source) {
             super.die(source);
             if (source === player) player.gainReward(40, 28);
+        }
+        // Titik tujuan berikutnya sesuai jalur gelombang (tengah / atas / bawah), lalu basis lawan
+        getLaneGoal() {
+            const route = this.route;
+            const gp = this.group.position;
+            if (route && this.routeIdx < route.length) {
+                while (this.routeIdx < route.length) {
+                    const wp = route[this.routeIdx];
+                    const nx = route[this.routeIdx + 1];
+                    const d = Math.hypot(wp[0] - gp.x, wp[1] - gp.z);
+                    // maju bila sudah dekat titik ini, atau titik berikutnya sudah lebih dekat
+                    if (d < 85 || (nx && Math.hypot(nx[0] - gp.x, nx[1] - gp.z) < d)) this.routeIdx++;
+                    else break;
+                }
+                if (this.routeIdx < route.length) {
+                    const wp = route[this.routeIdx];
+                    return this._goal.set(wp[0], 0, wp[1]);
+                }
+            }
+            return this.team === 'blue' ? this._goal.set(1020, 0, -1020) : this._goal.set(-1020, 0, 1020);
         }
         moveWithAvoidance(desiredGoal, dt) {
             const rawDir = desiredGoal.clone().sub(this.group.position);
@@ -8079,9 +8366,8 @@
                     }
                 }
             } else {
-                const goal = this.team === 'blue' ? new THREE.Vector3(1020, 0, -1020) : new THREE.Vector3(-1020, 0, 1020);
                 moving = true;
-                this.moveWithAvoidance(goal, dt);
+                this.moveWithAvoidance(this.getLaneGoal(), dt);
             }
 
             resolveCollisions(this.group.position, this.radius);
@@ -10003,7 +10289,7 @@
         conquer() {
             this.state = 'DESTROYED';
             spawnBurst(this.group.position, 0xffd700, 50);
-            playSfx('win');
+            playSfx('towerfall', this.group.position);
             this.die();
 
             if (this.isInteractiveGate) {
@@ -10195,7 +10481,7 @@
                         e.takeDamage(this.dmg, this.owner);
                         spawnBurst(this.pos, neonHex, 10);
                         if (this.owner && this.owner.isPlayer) {
-                            playSfx('hit');
+                            playSfx('hit', this.pos);
                             spawnCombatFlashLight(this.pos, neonHex, 3.0, 75, 0.16);
                         }
                         this.life = 0;
@@ -10544,6 +10830,7 @@
         redKills = 0;
         matchTime = 0;
         waveTimer = 2;
+        waveCounter = 0;
         remainingGates = 10;
         document.getElementById('score-blue').innerText = '0';
         document.getElementById('score-red').innerText = '0';
@@ -11307,6 +11594,7 @@
         ).join('');
 
         quizTimer = 10.0;
+        _lastQuizTickSec = 0;
         document.getElementById('quiz-screen').classList.remove('hidden');
     }
 
@@ -11326,11 +11614,11 @@
             allBtns[currentQuestion.ans].classList.add('correct');
             fb.style.color = '#4cd964';
             fb.innerText = `BENAR! ${currentQuestion.exp}`;
-            playSfx('win');
+            playSfx('correct');
         } else {
             fb.style.color = '#ff5e57';
             fb.innerText = `${chosenIdx === null ? 'WAKTU HABIS!' : 'JAWABAN SALAH!'} Coba taklukkan Tower ini kembali!`;
-            playSfx('fail');
+            playSfx('wrong');
         }
 
         setTimeout(() => {
@@ -11950,12 +12238,37 @@
     window.updateSpectatorHudInfo = updateSpectatorHudInfo;
 
     // --- 11. START, WAVE SPAWNER & MAIN LOOP ---
+    // Jalur minion (koordinat peta 0..1024): biru (kiri-bawah) -> merah (kanan-atas).
+    // Merah memakai rute yang sama dibalik, sehingga kedua tim bertemu di jalur yang sama.
+    const WAVE_LANES = ['mid', 'top', 'bot'];
+    const LANE_ROUTES_MAP = {
+        mid: [[512, 512]],
+        top: [[135, 820], [122, 540], [118, 220], [165, 165], [220, 118], [540, 122], [860, 135]],
+        bot: [[204, 889], [480, 898], [800, 902], [859, 859], [902, 800], [898, 480], [890, 160]]
+    };
+    const _laneRouteCache = {};
+    let waveCounter = 0;
+
+    function getLaneRoute(laneKey, team) {
+        const base = LANE_ROUTES_MAP[laneKey];
+        if (!base) return null;
+        const cacheKey = `${laneKey}|${team}`;
+        if (_laneRouteCache[cacheKey]) return _laneRouteCache[cacheKey];
+        const world = base.map(([mx, mz]) => [((mx / 1024) - 0.5) * MAP_SIZE, ((mz / 1024) - 0.5) * MAP_SIZE]);
+        if (team === 'red') world.reverse();
+        _laneRouteCache[cacheKey] = world;
+        return world;
+    }
+
     function spawnMinionWave() {
+        // Gelombang ke-1 jalur tengah, ke-2 jalur atas, ke-3 jalur bawah, lalu berulang
+        const lane = WAVE_LANES[waveCounter % WAVE_LANES.length];
+        waveCounter++;
         for (let i = 0; i < 3; i++) {
             const offset = (i - 1) * 26;
             const isRanged = i === 2;
-            new Minion(-830 + offset, 830 + offset, 'blue', isRanged);
-            new Minion(830 + offset, -830 + offset, 'red', isRanged);
+            new Minion(-830 + offset, 830 + offset, 'blue', isRanged, lane);
+            new Minion(830 + offset, -830 + offset, 'red', isRanged, lane);
         }
     }
 
@@ -12280,6 +12593,7 @@
 
     // Hanya satu loop render yang boleh aktif (mencegah loop ganda & game berjalan 2x lebih cepat)
     let _loopActive = false;
+    let _lastQuizTickSec = 0;
     function startLoop() {
         if (_loopActive) return;
         _loopActive = true;
@@ -12425,6 +12739,8 @@
             }
         } else if (gameState === 2) {
             quizTimer -= dt;
+            const _qs = Math.ceil(quizTimer);
+            if (_qs !== _lastQuizTickSec && _qs <= 5 && _qs > 0) { _lastQuizTickSec = _qs; playSfx('tick'); }
             document.getElementById('quiz-timer-fill').style.width = `${Math.max(0, (quizTimer / 10) * 100)}%`;
             if (quizTimer <= 0) submitQuiz(null, null);
         }
