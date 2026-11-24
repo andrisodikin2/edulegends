@@ -1150,7 +1150,7 @@
         /* Virtual Joystick Left */
         #joystick-zone { position: absolute; bottom: 0; left: 0; width: 42%; height: 58%; pointer-events: auto; }
         #joystick-hint {
-            position: absolute; bottom: 38px; left: 38px; width: 124px; height: 124px;
+            position: absolute; bottom: clamp(44px, 9vh, 92px); left: clamp(48px, 7vw, 120px); width: 140px; height: 140px;
             border-radius: 50%;
             background:
                 radial-gradient(circle, rgba(15, 23, 42, 0.72) 0%, rgba(15, 23, 42, 0.42) 55%, rgba(0, 229, 255, 0.14) 100%);
@@ -1163,7 +1163,7 @@
         }
         #joystick-hint::before {
             content: '';
-            width: 48px; height: 48px;
+            width: 54px; height: 54px;
             border-radius: 50%;
             background: radial-gradient(circle at 35% 30%, rgba(148, 163, 184, 0.65), rgba(30, 41, 59, 0.85) 65%, rgba(9, 14, 26, 0.95) 100%);
             border: 2px solid rgba(229, 184, 75, 0.65);
@@ -1185,7 +1185,7 @@
         .joy-arrow.right { right: 10px; top: 50%; transform: translateY(-50%); }
 
         #joystick-base {
-            position: absolute; width: 132px; height: 132px;
+            position: absolute; width: 148px; height: 148px;
             background:
                 radial-gradient(circle, rgba(8, 13, 24, 0.88) 0%, rgba(15, 23, 42, 0.76) 56%, rgba(0, 229, 255, 0.24) 88%, rgba(229, 184, 75, 0.35) 100%);
             border: 3px solid var(--ml-gold);
@@ -1198,14 +1198,14 @@
             content: '';
             position: absolute;
             top: 50%; left: 50%;
-            width: 74px; height: 74px;
+            width: 84px; height: 84px;
             transform: translate(-50%, -50%);
             border-radius: 50%;
             border: 1.5px dashed rgba(0, 229, 255, 0.45);
             pointer-events: none;
         }
         #joystick-stick {
-            position: absolute; width: 56px; height: 56px;
+            position: absolute; width: 64px; height: 64px;
             background:
                 repeating-radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.14) 0px, rgba(255, 255, 255, 0.14) 2px, transparent 2px, transparent 5px),
                 radial-gradient(circle at 34% 28%, #ffffff 0%, #bae6fd 26%, #0284c7 68%, #0c192e 100%);
@@ -1218,7 +1218,7 @@
         }
 
         /* Action Buttons Right */
-        .action-cluster { position: absolute; bottom: 16px; right: 16px; width: 268px; height: 268px; pointer-events: auto; }
+        .action-cluster { position: absolute; bottom: clamp(26px, 6vh, 64px); right: clamp(30px, 4.5vw, 90px); width: 268px; height: 268px; pointer-events: auto; }
         .moba-btn {
             position: absolute; border-radius: 50%;
             display: flex; flex-direction: column; align-items: center; justify-content: center;
@@ -1391,7 +1391,7 @@
             #minimap-frame { width: 126px; height: 126px; }
             .scoreboard { width: 260px; height: 46px; padding: 0 16px; }
             .hero-hud { width: 274px; bottom: 10px; }
-            .action-cluster { width: 224px; height: 224px; right: 10px; bottom: 10px; }
+            .action-cluster { width: 224px; height: 224px; right: 26px; bottom: 28px; }
             #btn-attack { width: 80px; height: 80px; font-size: 1.95rem; }
             #btn-q { width: 55px; height: 55px; right: 100px; bottom: 10px; }
             #btn-e { width: 55px; height: 55px; right: 88px; bottom: 79px; }
@@ -1470,7 +1470,7 @@
             .bar-track.xp-track { height: 4px; }
             .bar-label { font-size: 0.54rem; line-height: 9px; }
 
-            .action-cluster { width: 196px; height: 196px; right: max(10px, env(safe-area-inset-right)); bottom: 8px; }
+            .action-cluster { width: 196px; height: 196px; right: max(34px, calc(env(safe-area-inset-right) + 20px)); bottom: 22px; }
             #btn-attack { bottom: 4px; right: 4px; width: 70px; height: 70px; font-size: 1.7rem; }
             #btn-q { bottom: 10px; right: 89px; width: 48px; height: 48px; }
             #btn-e { bottom: 69px; right: 77px; width: 48px; height: 48px; }
@@ -1480,11 +1480,11 @@
             .skill-key { width: 14px; height: 14px; font-size: 0.52rem; top: -3px; right: -3px; }
             .cd-mask { font-size: 0.85rem; }
 
-            #joystick-hint { width: 92px; height: 92px; bottom: 18px; left: max(26px, env(safe-area-inset-left)); }
-            #joystick-hint::before { width: 36px; height: 36px; }
-            #joystick-base { width: 108px; height: 108px; }
-            #joystick-base::before { width: 60px; height: 60px; }
-            #joystick-stick { width: 46px; height: 46px; }
+            #joystick-hint { width: 102px; height: 102px; bottom: 30px; left: max(44px, calc(env(safe-area-inset-left) + 20px)); }
+            #joystick-hint::before { width: 40px; height: 40px; }
+            #joystick-base { width: 120px; height: 120px; }
+            #joystick-base::before { width: 66px; height: 66px; }
+            #joystick-stick { width: 52px; height: 52px; }
             .joy-arrow { font-size: 8px; }
             .joy-arrow.up { top: 7px; } .joy-arrow.down { bottom: 7px; }
             .joy-arrow.left { left: 7px; } .joy-arrow.right { right: 7px; }
@@ -12225,7 +12225,7 @@
         }
         let dx = clientX - joyOrigin.x;
         let dy = clientY - joyOrigin.y;
-        const maxR = Math.max(28, Math.round((joyBase && joyBase.offsetWidth ? joyBase.offsetWidth : 132) / 3));
+        const maxR = Math.max(28, Math.round((joyBase && joyBase.offsetWidth ? joyBase.offsetWidth : 148) / 3));
         const dist = Math.hypot(dx, dy);
         if (dist > maxR) { dx = (dx / dist) * maxR; dy = (dy / dist) * maxR; }
         joyStick.style.transform = `translate(calc(-50% + ${dx}px), calc(-50% + ${dy}px))`;
