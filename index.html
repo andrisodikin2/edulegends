@@ -63,6 +63,91 @@
             appId: typeof __app_id !== 'undefined' ? __app_id : 'edu-legends-moba'
         };
 
+        // ---- Pengatur beban jaringan & UI (skala banyak pemain) ----
+        // Gabungkan data peer: yang lebih baru menang, duplikat/usang diabaikan
+        function mergePeers(incoming) {
+            const cn = window.CloudNet;
+            let changed = false;
+            for (const uid in incoming) {
+                const inc = incoming[uid];
+                if (!inc) continue;
+                const prev = cn.remotePeers[uid];
+                if (prev && prev.updatedAt && inc.updatedAt && inc.updatedAt <= prev.updatedAt) continue;
+                cn.remotePeers[uid] = inc;
+                changed = true;
+            }
+            return changed;
+        }
+
+        // Sinkron UI/entitas maksimal ~14x per detik, bukan sekali per pesan
+        let _uiTimer = null, _rosterDirty = false, _lastRosterAt = 0;
+        function scheduleUiSync(rosterChanged) {
+            if (rosterChanged) _rosterDirty = true;
+            if (_uiTimer) return;
+            _uiTimer = setTimeout(() => {
+                _uiTimer = null;
+                const cn = window.CloudNet;
+                if (!cn || !cn.roomId) return;
+                if (window.syncRemoteHeroEntities) window.syncRemoteHeroEntities(cn.remotePeers);
+                if (_rosterDirty) {
+                    const now = performance.now();
+                    if (now - _lastRosterAt > 300) {
+                        _rosterDirty = false;
+                        _lastRosterAt = now;
+                        if (window.renderMpRoster) window.renderMpRoster(cn.remotePeers);
+                        if (window.updateSpectatorHudInfo) window.updateSpectatorHudInfo();
+                    } else {
+                        scheduleUiSync(false);
+                    }
+                }
+            }, 70);
+        }
+
+        // Host: kumpulkan perubahan lalu kirim satu paket per 100 ms (bukan seluruh roster tiap pesan)
+        let _relayDirty = {}, _relayTimer = null, _relayTick = 0;
+        function queueHostRelay(peer) {
+            _relayDirty[peer.uid] = peer;
+            if (_relayTimer) return;
+            _relayTimer = setTimeout(flushHostRelay, 100);
+        }
+        function flushHostRelay() {
+            _relayTimer = null;
+            const cn = window.CloudNet;
+            if (!cn || !cn.isHost || !cn.roomId) { _relayDirty = {}; return; }
+            _relayTick++;
+            const isFull = (_relayTick % 30 === 0); // sinkron penuh tiap ~3 dtk
+            const peers = isFull ? cn.remotePeers : _relayDirty;
+            _relayDirty = {};
+            if (!Object.keys(peers).length) return;
+            const conns = Object.values(cn.clientConns || {});
+            if (isFull || conns.length <= 5) {
+                broadcastToP2PClients({ type: 'full_roster', roomId: cn.roomId, roomStatus: cn.roomStatus, peers });
+                return;
+            }
+            // Ruangan besar: tiap klien menerima pemain di sekitarnya setiap 100 ms, pemain yang jauh (di luar layar) tiap 500 ms
+            const farTurn = (_relayTick % 5 === 0);
+            conns.forEach((conn) => {
+                if (!conn || !conn.open) return;
+                const me = conn._uid ? cn.remotePeers[conn._uid] : null;
+                const subset = {};
+                let any = false;
+                for (const uid in peers) {
+                    if (uid === conn._uid) continue;
+                    const p = peers[uid];
+                    if (!p) continue;
+                    let near = true;
+                    if (me && typeof me.x === 'number' && typeof p.x === 'number') {
+                        near = Math.abs(p.x - me.x) < 1500 && Math.abs(p.z - me.z) < 1500;
+                    }
+                    if (near || farTurn || p.isDead) { subset[uid] = p; any = true; }
+                }
+                if (any) {
+                    const pkt = { type: 'full_roster', roomId: cn.roomId, roomStatus: cn.roomStatus, peers: subset };
+                    if (!p2pCongested(conn, pkt)) { try { conn.send(pkt); } catch (e) {} }
+                }
+            });
+        }
+
         function handleIncomingNetworkMessage(msg) {
             const cn = window.CloudNet;
             if (!msg || !msg.roomId) return;
@@ -88,33 +173,23 @@
             if (cn.roomId !== msg.roomId) return;
 
             if (msg.type === 'full_roster' && msg.peers) {
-                cn.remotePeers = { ...cn.remotePeers, ...msg.peers };
+                const rosterChanged = mergePeers(msg.peers);
                 if (msg.roomStatus) cn.roomStatus = msg.roomStatus;
-                if (window.renderMpRoster) window.renderMpRoster(cn.remotePeers);
-                if (window.syncRemoteHeroEntities) window.syncRemoteHeroEntities(cn.remotePeers);
-                if (window.updateSpectatorHudInfo) window.updateSpectatorHudInfo();
+                scheduleUiSync(rosterChanged);
                 if (!cn.isSpectator && cn.roomStatus === 'playing' && window.getGameState && window.getGameState() === 0 && window.launchMultiplayerFromLobby) {
                     window.launchMultiplayerFromLobby();
                 }
             } else if (msg.type === 'peer_update' && msg.peer) {
                 if (msg.peer.isSpectator || msg.peer.team === 'spectator') return;
+                const prevPeer = cn.remotePeers[msg.peer.uid];
+                // Abaikan paket usang / ganda (mis. datang lewat BroadcastChannel dan P2P sekaligus)
+                if (prevPeer && prevPeer.updatedAt && msg.peer.updatedAt && msg.peer.updatedAt <= prevPeer.updatedAt) return;
                 cn.remotePeers[msg.peer.uid] = msg.peer;
-                if (window.renderMpRoster) window.renderMpRoster(cn.remotePeers);
-                if (window.syncRemoteHeroEntities) window.syncRemoteHeroEntities(cn.remotePeers);
-                if (window.updateSpectatorHudInfo) window.updateSpectatorHudInfo();
-                if (cn.isHost) {
-                    broadcastToP2PClients({
-                        type: 'full_roster',
-                        roomId: cn.roomId,
-                        roomStatus: cn.roomStatus,
-                        peers: cn.remotePeers
-                    });
-                }
+                scheduleUiSync(!prevPeer || prevPeer.team !== msg.peer.team || prevPeer.heroId !== msg.peer.heroId || prevPeer.playerName !== msg.peer.playerName);
+                if (cn.isHost) queueHostRelay(msg.peer);
             } else if (msg.type === 'peer_leave' && msg.uid) {
                 delete cn.remotePeers[msg.uid];
-                if (window.renderMpRoster) window.renderMpRoster(cn.remotePeers);
-                if (window.syncRemoteHeroEntities) window.syncRemoteHeroEntities(cn.remotePeers);
-                if (window.updateSpectatorHudInfo) window.updateSpectatorHudInfo();
+                scheduleUiSync(true);
                 if (cn.isHost) {
                     broadcastToP2PClients({ type: 'peer_leave', roomId: cn.roomId, uid: msg.uid });
                 }
@@ -144,10 +219,19 @@
             }
         }
 
+        // Koneksi lambat: data posisi yang sudah usang dibuang (bukan diantrekan) -> latensi tidak menumpuk
+        function p2pCongested(conn, payload) {
+            if (!payload || (payload.type !== 'peer_update' && payload.type !== 'full_roster')) return false;
+            try {
+                const dc = conn && conn.dataChannel;
+                return Boolean(dc && dc.bufferedAmount > 24576);
+            } catch (e) { return false; }
+        }
+
         function broadcastToP2PClients(payload) {
             const cn = window.CloudNet;
             Object.values(cn.clientConns || {}).forEach((conn) => {
-                if (conn && conn.open) {
+                if (conn && conn.open && !p2pCongested(conn, payload)) {
                     try { conn.send(payload); } catch (e) {}
                 }
             });
@@ -157,13 +241,15 @@
             const cn = window.CloudNet;
             if (cn.isHost) {
                 broadcastToP2PClients(payload);
-            } else if (cn.hostConn && cn.hostConn.open) {
+            } else if (cn.hostConn && cn.hostConn.open && !p2pCongested(cn.hostConn, payload)) {
                 try { cn.hostConn.send(payload); } catch (e) {}
             }
         }
 
         function cleanupP2P() {
             const cn = window.CloudNet;
+            if (_relayTimer) { clearTimeout(_relayTimer); _relayTimer = null; }
+            _relayDirty = {};
             if (cn.heartbeatTimer) {
                 clearInterval(cn.heartbeatTimer);
                 cn.heartbeatTimer = null;
@@ -436,8 +522,7 @@
                             peers[d.id] = pData;
                         });
                         cn.remotePeers = peers;
-                        if (window.syncRemoteHeroEntities) window.syncRemoteHeroEntities(peers);
-                        if (window.updateSpectatorHudInfo) window.updateSpectatorHudInfo();
+                        scheduleUiSync(true);
                     }, (err) => console.warn('Spectator players snapshot error:', err));
 
                     cn.unsubRoom = onSnapshot(roomRef, (docSnap) => {
@@ -447,9 +532,12 @@
 
                     const eventsCol = collection(cn.db, 'artifacts', cn.appId, 'public', 'data', `mp_room_${code}_events`);
                     cn.unsubEvents = onSnapshot(eventsCol, (querySnap) => {
-                        querySnap.forEach((d) => {
+                        querySnap.docChanges().forEach((ch) => {
+                            if (ch.type !== 'added') return;
+                            const d = ch.doc;
                             if (cn.lastProcessedEventIds.has(d.id)) return;
                             cn.lastProcessedEventIds.add(d.id);
+                            if (cn.lastProcessedEventIds.size > 600) cn.lastProcessedEventIds.delete(cn.lastProcessedEventIds.values().next().value);
                             const ev = d.data();
                             if (Date.now() - (ev.ts || 0) > 8000) return;
                             if (window.handleRemoteCombatEvent) window.handleRemoteCombatEvent(ev);
@@ -533,8 +621,7 @@
                             peers[d.id] = d.data();
                         });
                         cn.remotePeers = peers;
-                        if (window.renderMpRoster) window.renderMpRoster(peers);
-                        if (window.syncRemoteHeroEntities) window.syncRemoteHeroEntities(peers);
+                        scheduleUiSync(true);
                     }, (err) => console.warn('Players snapshot error:', err));
 
                     cn.unsubRoom = onSnapshot(roomRef, (docSnap) => {
@@ -548,9 +635,12 @@
 
                     const eventsCol = collection(cn.db, 'artifacts', cn.appId, 'public', 'data', `mp_room_${code}_events`);
                     cn.unsubEvents = onSnapshot(eventsCol, (querySnap) => {
-                        querySnap.forEach((d) => {
+                        querySnap.docChanges().forEach((ch) => {
+                            if (ch.type !== 'added') return;
+                            const d = ch.doc;
                             if (cn.lastProcessedEventIds.has(d.id)) return;
                             cn.lastProcessedEventIds.add(d.id);
+                            if (cn.lastProcessedEventIds.size > 600) cn.lastProcessedEventIds.delete(cn.lastProcessedEventIds.values().next().value);
                             const ev = d.data();
                             if (ev.senderId === cn.userId) return;
                             if (Date.now() - (ev.ts || 0) > 8000) return;
@@ -649,10 +739,22 @@
             };
             cn.remotePeers[cn.userId] = updatedPeer;
             if (!cn.localMode && cn.user && cn.db) {
-                try {
-                    const playerDocRef = doc(cn.db, 'artifacts', cn.appId, 'public', 'data', `mp_room_${cn.roomId}_players`, cn.userId);
-                    await setDoc(playerDocRef, updatedPeer, { merge: true });
-                } catch (e) {}
+                // Tulis ke Firestore dibatasi & digabung: posisi terakhir selalu terkirim, tanpa membanjiri kuota
+                cn._cloudPending = updatedPeer;
+                if (!cn._cloudTimer) {
+                    const wait = Math.max(0, 400 - (Date.now() - (cn._lastCloudWrite || 0)));
+                    cn._cloudTimer = setTimeout(async () => {
+                        cn._cloudTimer = null;
+                        const data = cn._cloudPending;
+                        cn._cloudPending = null;
+                        if (!data || !cn.roomId || !cn.db) return;
+                        cn._lastCloudWrite = Date.now();
+                        try {
+                            const playerDocRef = doc(cn.db, 'artifacts', cn.appId, 'public', 'data', `mp_room_${cn.roomId}_players`, cn.userId);
+                            await setDoc(playerDocRef, data, { merge: true });
+                        } catch (e) {}
+                    }, wait);
+                }
             } else {
                 if (cn.bc) {
                     cn.bc.postMessage({ type: 'peer_update', roomId: cn.roomId, peer: updatedPeer });
@@ -1879,7 +1981,7 @@
             <div id="admin-login-box" class="mt-4 rounded-xl border border-amber-400/40 bg-slate-900/90 p-5 text-center">
                 <div class="text-3xl mb-2">🛡️</div>
                 <h3 class="font-cinzel text-lg font-bold text-amber-200">VERIFIKASI AKSES ADMIN</h3>
-                <p class="text-xs text-slate-300 mt-1 mb-4">Masukkan kata sandi admin untuk mengelola soal atau masuk ke Ruang Pantau Arena. <span class="text-slate-400"></span></p>
+                <p class="text-xs text-slate-300 mt-1 mb-4">Masukkan kata sandi admin untuk mengelola soal atau masuk ke Ruang Pantau Arena. <span class="text-slate-400">(Default: <b>admin123</b>)</span></p>
                 <div class="max-w-xs mx-auto flex flex-col gap-2.5">
                     <input id="admin-password-input" type="password" placeholder="Masukkan Password Admin..." onkeydown="if(event.key==='Enter') verifyAdminPassword()"
                         class="w-full rounded-xl border border-amber-400/60 bg-slate-950 px-3.5 py-2.5 text-sm font-bold text-white outline-none focus:border-amber-300" />
@@ -2696,6 +2798,7 @@
     }
 
     function renderMpRoster(peers) {
+        if (gameState === 1) return; // daftar lobi tidak terlihat saat pertandingan berjalan
         const blueListEl = document.getElementById('mp-roster-blue');
         const redListEl = document.getElementById('mp-roster-red');
         const countEl = document.getElementById('mp-player-count');
@@ -7854,28 +7957,36 @@
 
         syncHeroOverheadUI() {
             if (!this.overheadBadge || !camera) return;
-            if (this.isDead || !this.group.visible) {
-                this.overheadBadge.style.display = 'none';
-                if (this.hpWrap) this.hpWrap.style.display = 'none';
-                return;
+            const hide = () => {
+                if (this._ohShown !== false) {
+                    this._ohShown = false;
+                    this.overheadBadge.style.display = 'none';
+                    if (this.hpWrap) this.hpWrap.style.display = 'none';
+                }
+            };
+            if (this.isDead || !this.group.visible) { hide(); return; }
+            const gp = this.group.position;
+            const p = _tmpV1.set(gp.x, gp.y + 41, gp.z).project(camera);
+            if (p.z > 1 || p.x < -1.25 || p.x > 1.25 || p.y < -1.25 || p.y > 1.25) { hide(); return; }
+            const sx = Math.round((p.x * 0.5 + 0.5) * window.innerWidth * 10) / 10;
+            const sy = Math.round((p.y * -0.5 + 0.5) * window.innerHeight * 10) / 10;
+            if (this._ohShown !== true) {
+                this._ohShown = true;
+                this.hpWrap.style.display = 'block';
+                this.overheadBadge.style.display = 'flex';
             }
-            const p = this.group.position.clone().add(new THREE.Vector3(0, 41, 0)).project(camera);
-            if (p.z > 1) {
-                this.overheadBadge.style.display = 'none';
-                if (this.hpWrap) this.hpWrap.style.display = 'none';
-                return;
+            if (sx !== this._ohX || sy !== this._ohY) {
+                this._ohX = sx; this._ohY = sy;
+                this.hpWrap.style.left = `${sx}px`;
+                this.hpWrap.style.top = `${sy}px`;
+                this.overheadBadge.style.left = `${sx}px`;
+                this.overheadBadge.style.top = `${sy - 10}px`;
             }
-            const sx = (p.x * 0.5 + 0.5) * window.innerWidth;
-            const sy = (p.y * -0.5 + 0.5) * window.innerHeight;
-
-            this.hpWrap.style.display = 'block';
-            this.hpWrap.style.left = `${sx}px`;
-            this.hpWrap.style.top = `${sy}px`;
-            this.hpFill.style.width = `${(this.hp / this.maxHp) * 100}%`;
-
-            this.overheadBadge.style.display = 'flex';
-            this.overheadBadge.style.left = `${sx}px`;
-            this.overheadBadge.style.top = `${sy - 10}px`;
+            const hpPct = `${(this.hp / this.maxHp) * 100}%`;
+            if (hpPct !== this._ohHp) {
+                this._ohHp = hpPct;
+                this.hpFill.style.width = hpPct;
+            }
         }
 
         gainReward(gold, xp) {
@@ -8115,6 +8226,11 @@
                 const isMoving = this.remoteIsMoving;
                 if (this.groundAura) {
                     this.groundAura.update(dt, nowSec, isMoving ? 1.25 : 1.0);
+                }
+                // Hero lawan yang jauh di luar layar: animasi rig cukup tiap 8 frame (tak terlihat pemain)
+                if (_camFocus && (Math.abs(this.group.position.x - _camFocus.x) > 950 || Math.abs(this.group.position.z - _camFocus.z) > 800) && (_lodFrame & 7) !== 0) {
+                    this.syncHeroOverheadUI();
+                    return;
                 }
                 if (this.rig) {
                     const mb = this.moveBlend = approachValue(this.moveBlend || 0, isMoving ? 1 : 0, dt * 9);
@@ -11379,7 +11495,7 @@
         { cat: 'Informatika', q: 'Tag HTML untuk membuat tautan (hyperlink) adalah?', opts: ['<link>', '<a>', '<href>', '<url>'], ans: 1, exp: 'Tag <a> (anchor) digunakan untuk membuat hyperlink.' }
     ];
 
-    const ADMIN_PASSWORD = 'anso123';
+    const ADMIN_PASSWORD = 'admin123';
     const QUIZ_STORAGE_KEY = 'edu_legends_custom_questions_v1';
     let adminAuthenticated = false;
     let editingQuestionIdx = null;
@@ -12441,16 +12557,16 @@
             const projKind = (ev.archetype === 'kael' || ev.archetype === 'valkyrie') ? 'arrow' : 'orb';
             const vfxKind = ev.archetype === 'thorne' ? 'slam' : ((ev.archetype === 'lyra' || ev.archetype === 'valkyrie') ? 'thrust' : (ev.archetype === 'kael' ? 'bow' : 'slash'));
             projectiles.push(new Projectile(pos.clone().addScaledVector(dir, 14), dir, 310, ev.dmg || 75, evTeam, rHero || player, false, neonHex, projKind));
-            spawnWeaponAttackVfx(pos, ev.rotY || 0, neonHex, vfxKind);
+            if (attackVfxList.length < 28) spawnWeaponAttackVfx(pos, ev.rotY || 0, neonHex, vfxKind);
             spawnBurst(pos.clone().addScaledVector(dir, 14), neonHex, 12);
         } else if (ev.type === 'skill_q') {
             const isSlash = ev.archetype === 'aether' || ev.archetype === 'zephyr';
             const projKind = (ev.archetype === 'kael' || ev.archetype === 'valkyrie') ? 'arrow' : 'orb';
             projectiles.push(new Projectile(pos, dir, 340, ev.dmg || 160, evTeam, rHero || player, isSlash, neonHex, projKind));
-            spawnWeaponAttackVfx(pos, ev.rotY || 0, neonHex, ev.archetype === 'thorne' ? 'slam' : 'slash');
+            if (attackVfxList.length < 28) spawnWeaponAttackVfx(pos, ev.rotY || 0, neonHex, ev.archetype === 'thorne' ? 'slam' : 'slash');
         } else if (ev.type === 'skill_r') {
             spawnBurst(pos, neonHex, 40);
-            spawnWeaponAttackVfx(pos, ev.rotY || 0, neonHex, 'slam');
+            if (attackVfxList.length < 28) spawnWeaponAttackVfx(pos, ev.rotY || 0, neonHex, 'slam');
         }
     }
 
@@ -13049,7 +13165,7 @@
     }
 
     // Pengatur kualitas adaptif: hanya aktif pada perangkat yang benar-benar lambat
-    let _perfAcc = 0, _perfFrames = 0, _perfLevel = 0, _frameNo = 0, _lastClockSec = -1, _clockEl = null;
+    let _perfAcc = 0, _perfFrames = 0, _perfLevel = 0, _frameNo = 0, _lastClockSec = -1, _clockEl = null, _lodFrame = 0;
     function perfGovernor(rawMs) {
         if (rawMs > 250) return; // abaikan jeda (pindah tab / hitch tunggal)
         _perfAcc += rawMs;
@@ -13079,6 +13195,7 @@
         const nowSec = now * 0.001;
         lastTime = now;
         perfGovernor(rawMs);
+        _lodFrame++;
 
         if (riverMat) riverMat.emissiveIntensity = 0.44 + Math.sin(now * 0.004) * 0.14;
         if (riverFlowTex) {
