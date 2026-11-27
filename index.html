@@ -926,7 +926,7 @@
         .dmg-float {
             position: absolute; font-weight: 900; font-size: 20px;
             text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 10px rgba(255, 255, 255, 0.4);
-            animation: floatUp 0.85s ease-out forwards; transform: translate(-50%, -50%);
+            left: 0; top: 0; will-change: transform, opacity;
             white-space: nowrap;
         }
         @keyframes floatUp {
@@ -1603,6 +1603,8 @@
         .hp-wrap, .entity-label, .hero-overhead-badge { left: 0; top: 0; }
         .hp-wrap, .hero-overhead-badge { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
         /* Perangkat sedang/lemah (atau saat FPS turun): blur latar HUD & soal dimatikan (sangat berat di atas kanvas yang bergerak) */
+        #clock-text { pointer-events: auto; }
+        #quality-select option { background: #0f172a; color: #ffffff; }
         .perf-lite #hud, .perf-lite #hud *,
         .perf-lite #quiz-screen, .perf-lite #quiz-screen *,
         .perf-lite #shop-screen, .perf-lite #shop-screen *,
@@ -1658,6 +1660,16 @@
                         <span>Hero:</span>
                         <span id="home-selected-hero-badge" class="font-cinzel font-black text-cyan-300">⚔️ AETHER</span>
                     </div>
+                    <label class="inline-flex items-center gap-2 rounded-full border border-emerald-400/50 bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-emerald-200 shadow-inner whitespace-nowrap">
+                        <span>🎮 Grafis:</span>
+                        <select id="quality-select" onchange="setQualityPreference(this.value)" class="bg-transparent font-extrabold text-white outline-none">
+                            <option value="auto">Otomatis</option>
+                            <option value="high">Tinggi</option>
+                            <option value="mid">Sedang</option>
+                            <option value="low">Rendah</option>
+                            <option value="ultra">Sangat Rendah (Hemat)</option>
+                        </select>
+                    </label>
                 </div>
             </div>
 
@@ -3682,7 +3694,7 @@
         auraGroup.add(auraBloomDisc, auraRuneDisc, auraCoreRing, auraPulseRing);
 
         let auraLight = null;
-        if (hasPointLight) {
+        if (hasPointLight && !_ultraMode) {
             auraLight = new THREE.PointLight(ringColor, 2.3, outerRad * 5.2, 1.5);
             auraLight.position.set(0, 4.5, 0);
             auraGroup.add(auraLight);
@@ -5469,8 +5481,23 @@
     let activeDynamicLights = 0;
     // ===== OPTIMASI PERANGKAT: deteksi tingkat perangkat & penggabungan mesh dunia statis =====
     let _perfTier = null;
+    let _ultraMode = false, _frameCapMs = 0, _lastStepTs = 0;
+    function getQualityPreference() {
+        try { return localStorage.getItem('edu_quality') || 'auto'; } catch (e) { return 'auto'; }
+    }
+    function setQualityPreference(v) {
+        try { localStorage.setItem('edu_quality', v); } catch (e) {}
+        _perfTier = null;
+        if (sceneReady) location.reload(); // renderer sudah dibuat: muat ulang agar pengaturan berlaku penuh
+    }
+    (function initQualitySelect() {
+        const s = document.getElementById('quality-select');
+        if (s) s.value = getQualityPreference();
+    })();
     function detectPerfTier() {
         if (_perfTier) return _perfTier;
+        const pref = getQualityPreference();
+        if (pref === 'high' || pref === 'mid' || pref === 'low' || pref === 'ultra') { _perfTier = pref; return pref; }
         let tier = 'high';
         try {
             const cores = navigator.hardwareConcurrency || 4;
@@ -5490,7 +5517,8 @@
                 }
             } catch (e) {}
             const weakGpu = /SwiftShader|llvmpipe|Software|Mali-4|Mali-T[0-7]\d\d|Adreno \(TM\) [2-4]\d\d|PowerVR SGX|Intel\(R\) HD Graphics [0-4]\d\d\d?\b/i.test(gpu);
-            if (mem <= 2 || cores <= 2 || weakGpu || conn.saveData) tier = 'low';
+            if (mem <= 1 || (cores <= 2 && mem <= 2)) tier = 'ultra';
+            else if (mem <= 2 || cores <= 2 || weakGpu || conn.saveData) tier = 'low';
             else if (mobile || mem <= 4 || cores <= 4) tier = 'mid';
         } catch (e) {}
         _perfTier = tier;
@@ -5676,7 +5704,7 @@
     // Pool 3 PointLight permanen: jumlah lampu di scene konstan, sehingga shader tidak dikompilasi ulang saat flash muncul/hilang
     const _flashPool = [];
     function ensureFlashLightPool() {
-        if (!scene) return;
+        if (!scene || _ultraMode) return;
         while (_flashPool.length < 3) {
             const l = new THREE.PointLight(0xffffff, 0, 165, 1.35);
             l.userData.inUse = false;
@@ -5722,6 +5750,51 @@
         });
     }
 
+    // ===== POOL EFEK: material & geometri efek dipakai ulang (tanpa inisialisasi material/geometri baru tiap serangan) =====
+    const _fxMatPool = new Map();
+    const _fxGeoCache = new Map();
+    function _fxKey(kind, p) {
+        return `${kind}|${p.transparent ? 1 : 0}|${p.blending || 0}|${p.depthWrite === false ? 0 : 1}|${p.depthTest === false ? 0 : 1}|${p.side || 0}|${p.map ? p.map.uuid : ''}|${p.fog === false ? 0 : 1}|${p.sizeAttenuation === false ? 0 : 1}`;
+    }
+    function _fxAcquire(kind, params, Ctor) {
+        const key = _fxKey(kind, params);
+        const pool = _fxMatPool.get(key);
+        if (pool && pool.length) {
+            const m = pool.pop();
+            m.userData.inPool = false;
+            m.color.set(params.color !== undefined ? params.color : 0xffffff);
+            m.opacity = params.opacity !== undefined ? params.opacity : 1;
+            if (kind === 'S') m.rotation = params.rotation || 0;
+            return m;
+        }
+        const m = new Ctor(params);
+        m.userData.fxKey = key;
+        return m;
+    }
+    function fxMat(params) { return _fxAcquire('M', params, THREE.MeshBasicMaterial); }
+    function fxSpriteMat(params) { return _fxAcquire('S', params, THREE.SpriteMaterial); }
+    function fxGeo(type, ...args) {
+        const key = type + '|' + args.join(',');
+        let g = _fxGeoCache.get(key);
+        if (!g) {
+            g = new THREE[type](...args);
+            if (_fxGeoCache.size < 200) { g.userData.keep = true; _fxGeoCache.set(key, g); }
+        }
+        return g;
+    }
+    // Kembalikan material efek ke pool saat objek efek dibuang
+    function releaseFx(root) {
+        if (!root || !root.traverse) return;
+        root.traverse(o => {
+            const m = o.material;
+            if (m && m.userData && m.userData.fxKey && !m.userData.inPool) {
+                let pool = _fxMatPool.get(m.userData.fxKey);
+                if (!pool) { pool = []; _fxMatPool.set(m.userData.fxKey, pool); }
+                if (pool.length < 48) { m.userData.inPool = true; pool.push(m); }
+            }
+        });
+    }
+
     // Kompilasi shader di muka (saat layar loading) -> tidak ada tersendat ketika efek/unit baru pertama kali muncul
     let _prewarmDone = false;
     function prewarmShaders() {
@@ -5763,9 +5836,10 @@
                 if (v.pooled) { releaseFlashLight(v.mesh); return; }
                 scene.remove(v.mesh);
                 disposeGeometries(v.mesh);
+                releaseFx(v.mesh);
             });
-            particles.splice(partStart).forEach(pt => { if (pt.mesh) scene.remove(pt.mesh); });
-            tmpProj.forEach(pr => { scene.remove(pr.group); disposeGeometries(pr.group); });
+            particles.splice(partStart).forEach(pt => { if (pt.mesh) { scene.remove(pt.mesh); releaseFx(pt.mesh); } });
+            tmpProj.forEach(pr => { scene.remove(pr.group); disposeGeometries(pr.group); releaseFx(pr.group); });
             tmpRoots.forEach(r => { scene.remove(r); disposeGeometries(r); });
         } catch (err) {}
     }
@@ -5779,9 +5853,9 @@
             if (e.overheadBadge) e.overheadBadge.remove();
         });
         entities = [];
-        projectiles.forEach(p => { if (p.group && scene) { scene.remove(p.group); disposeGeometries(p.group); } });
+        projectiles.forEach(p => { if (p.group && scene) { scene.remove(p.group); disposeGeometries(p.group); releaseFx(p.group); } });
         projectiles = [];
-        particles.forEach(p => { if (p.mesh && scene) scene.remove(p.mesh); });
+        particles.forEach(p => { if (p.mesh && scene) { scene.remove(p.mesh); releaseFx(p.mesh); } });
         particles = [];
         floatTexts.forEach(f => { if (f.el) f.el.remove(); });
         floatTexts = [];
@@ -5789,19 +5863,20 @@
             if (!v.mesh || !scene || v.pooled) return;
             scene.remove(v.mesh);
             disposeGeometries(v.mesh);
+            releaseFx(v.mesh);
         });
         attackVfxList = [];
         resetFlashLightPool();
     }
 
     function spawnWeaponAttackVfx(pos, rotY, colorHex, kind = 'slash') {
-        if (!scene) return;
+        if (!scene || _ultraMode) return;
         const grp = new THREE.Group();
         grp.position.set(pos.x, pos.y + 13, pos.z);
         grp.rotation.y = rotY;
 
         const glowTex = getNeonGlowSpriteTexture();
-        const outerNeonMat = new THREE.MeshBasicMaterial({
+        const outerNeonMat = fxMat({
             color: colorHex,
             transparent: true,
             opacity: 0.94,
@@ -5809,7 +5884,7 @@
             depthWrite: false,
             side: THREE.DoubleSide
         });
-        const coreWhiteMat = new THREE.MeshBasicMaterial({
+        const coreWhiteMat = fxMat({
             color: 0xffffff,
             transparent: true,
             opacity: 0.98,
@@ -5819,17 +5894,17 @@
         });
 
         if (kind === 'slam') {
-            const outerRing = new THREE.Mesh(new THREE.RingGeometry(14, 34, 36), outerNeonMat);
+            const outerRing = new THREE.Mesh(fxGeo('RingGeometry', 14, 34, 36), outerNeonMat);
             outerRing.rotation.x = -Math.PI / 2;
             outerRing.position.set(0, -10.5, 22);
 
-            const coreRing = new THREE.Mesh(new THREE.RingGeometry(19, 25, 36), coreWhiteMat);
+            const coreRing = new THREE.Mesh(fxGeo('RingGeometry', 19, 25, 36), coreWhiteMat);
             coreRing.rotation.x = -Math.PI / 2;
             coreRing.position.set(0, -10.2, 22);
 
             const pillar = new THREE.Mesh(
-                new THREE.CylinderGeometry(6, 18, 42, 20, 1, true),
-                new THREE.MeshBasicMaterial({
+                fxGeo('CylinderGeometry', 6, 18, 42, 20, 1, true),
+                fxMat({
                     color: colorHex,
                     transparent: true,
                     opacity: 0.72,
@@ -5841,8 +5916,8 @@
             pillar.position.set(0, 10, 22);
 
             const groundGlow = new THREE.Mesh(
-                new THREE.PlaneGeometry(76, 76),
-                new THREE.MeshBasicMaterial({
+                fxGeo('PlaneGeometry', 76, 76),
+                fxMat({
                     map: glowTex,
                     color: colorHex,
                     transparent: true,
@@ -5870,7 +5945,7 @@
 
             const outerCone = new THREE.Mesh(
                 makeApexCone(16, 78, 20),
-                new THREE.MeshBasicMaterial({
+                fxMat({
                     color: 0x0284c7,
                     transparent: true,
                     opacity: 0.78,
@@ -5882,7 +5957,7 @@
 
             const midCone = new THREE.Mesh(
                 makeApexCone(11, 66, 18),
-                new THREE.MeshBasicMaterial({
+                fxMat({
                     color: 0x00e5ff,
                     transparent: true,
                     opacity: 0.88,
@@ -5897,7 +5972,7 @@
                 coreWhiteMat
             );
 
-            const throatSpark = new THREE.Sprite(new THREE.SpriteMaterial({
+            const throatSpark = new THREE.Sprite(fxSpriteMat({
                 map: glowTex,
                 color: 0xffffff,
                 transparent: true,
@@ -5912,7 +5987,7 @@
                 const distZ = 16 + r * 16;
                 const rad = 3.2 + r * 3.1;
                 const sRing = new THREE.Mesh(
-                    new THREE.TorusGeometry(rad, 0.75, 8, 22),
+                    fxGeo('TorusGeometry', rad, 0.75, 8, 22),
                     r % 2 === 0 ? coreWhiteMat : outerNeonMat
                 );
                 sRing.position.set(0, 0, distZ);
@@ -5923,8 +5998,8 @@
             mouthPivot.add(outerCone, midCone, innerCoreCone, throatSpark);
 
             const groundScorch = new THREE.Mesh(
-                new THREE.PlaneGeometry(68, 68),
-                new THREE.MeshBasicMaterial({
+                fxGeo('PlaneGeometry', 68, 68),
+                fxMat({
                     map: glowTex,
                     color: 0x00e5ff,
                     transparent: true,
@@ -5943,8 +6018,8 @@
             grp.userData.groundScorch = groundScorch;
         } else if (kind === 'magma_fist') {
             const shockRing = new THREE.Mesh(
-                new THREE.RingGeometry(12, 32, 32),
-                new THREE.MeshBasicMaterial({
+                fxGeo('RingGeometry', 12, 32, 32),
+                fxMat({
                     color: 0xff5500,
                     transparent: true,
                     opacity: 0.95,
@@ -5957,8 +6032,8 @@
             shockRing.position.set(0, -10.5, 36);
 
             const magmaPillar = new THREE.Mesh(
-                new THREE.CylinderGeometry(8, 20, 48, 18, 1, true),
-                new THREE.MeshBasicMaterial({
+                fxGeo('CylinderGeometry', 8, 20, 48, 18, 1, true),
+                fxMat({
                     color: 0xff8800,
                     transparent: true,
                     opacity: 0.82,
@@ -5970,8 +6045,8 @@
             magmaPillar.position.set(0, 12, 36);
 
             const impactGlow = new THREE.Mesh(
-                new THREE.PlaneGeometry(82, 82),
-                new THREE.MeshBasicMaterial({
+                fxGeo('PlaneGeometry', 82, 82),
+                fxMat({
                     map: glowTex,
                     color: 0xff4500,
                     transparent: true,
@@ -5988,21 +6063,21 @@
             grp.userData.shockRing = shockRing;
             grp.userData.magmaPillar = magmaPillar;
         } else if (kind === 'thrust' || kind === 'bow') {
-            const outerBeam = new THREE.Mesh(new THREE.ConeGeometry(9.5, 38, 18, 1, true), outerNeonMat);
+            const outerBeam = new THREE.Mesh(fxGeo('ConeGeometry', 9.5, 38, 18, 1, true), outerNeonMat);
             outerBeam.rotation.x = Math.PI / 2;
             outerBeam.position.set(0, 2, 26);
 
-            const innerCore = new THREE.Mesh(new THREE.ConeGeometry(4.2, 32, 14, 1, true), coreWhiteMat);
+            const innerCore = new THREE.Mesh(fxGeo('ConeGeometry', 4.2, 32, 14, 1, true), coreWhiteMat);
             innerCore.rotation.x = Math.PI / 2;
             innerCore.position.set(0, 2, 24);
 
-            const sonicRing1 = new THREE.Mesh(new THREE.TorusGeometry(6.5, 0.85, 8, 24), coreWhiteMat);
+            const sonicRing1 = new THREE.Mesh(fxGeo('TorusGeometry', 6.5, 0.85, 8, 24), coreWhiteMat);
             sonicRing1.position.set(0, 2, 16);
 
-            const sonicRing2 = new THREE.Mesh(new THREE.TorusGeometry(10.5, 1.1, 8, 24), outerNeonMat);
+            const sonicRing2 = new THREE.Mesh(fxGeo('TorusGeometry', 10.5, 1.1, 8, 24), outerNeonMat);
             sonicRing2.position.set(0, 2, 28);
 
-            const tipFlare = new THREE.Sprite(new THREE.SpriteMaterial({
+            const tipFlare = new THREE.Sprite(fxSpriteMat({
                 map: glowTex,
                 color: colorHex,
                 transparent: true,
@@ -6016,7 +6091,7 @@
             grp.add(outerBeam, innerCore, sonicRing1, sonicRing2, tipFlare);
         } else {
             const outerArc = new THREE.Mesh(
-                new THREE.RingGeometry(18, 36, 36, 1, -Math.PI * 0.56, Math.PI * 1.12),
+                fxGeo('RingGeometry', 18, 36, 36, 1, -Math.PI * 0.56, Math.PI * 1.12),
                 outerNeonMat
             );
             outerArc.rotation.x = -Math.PI / 2;
@@ -6024,7 +6099,7 @@
             outerArc.position.set(0, 2, 16);
 
             const coreArc = new THREE.Mesh(
-                new THREE.RingGeometry(23, 29, 36, 1, -Math.PI * 0.50, Math.PI * 1.0),
+                fxGeo('RingGeometry', 23, 29, 36, 1, -Math.PI * 0.50, Math.PI * 1.0),
                 coreWhiteMat
             );
             coreArc.rotation.x = -Math.PI / 2;
@@ -6032,7 +6107,7 @@
             coreArc.position.set(0, 2.4, 16);
 
             const upperCrossArc = new THREE.Mesh(
-                new THREE.RingGeometry(19, 32, 32, 1, -Math.PI * 0.46, Math.PI * 0.92),
+                fxGeo('RingGeometry', 19, 32, 32, 1, -Math.PI * 0.46, Math.PI * 0.92),
                 outerNeonMat
             );
             upperCrossArc.rotation.x = -Math.PI / 3.2;
@@ -6040,8 +6115,8 @@
             upperCrossArc.position.set(0, 5, 15);
 
             const slashGlow = new THREE.Mesh(
-                new THREE.PlaneGeometry(78, 78),
-                new THREE.MeshBasicMaterial({
+                fxGeo('PlaneGeometry', 78, 78),
+                fxMat({
                     map: glowTex,
                     color: colorHex,
                     transparent: true,
@@ -6354,12 +6429,14 @@
             camera = new THREE.PerspectiveCamera(42, window.innerWidth / window.innerHeight, 1, 2800);
 
             const _tier = detectPerfTier();
-            renderer = new THREE.WebGLRenderer({ antialias: _tier !== 'low', powerPreference: 'high-performance' });
+            renderer = new THREE.WebGLRenderer({ antialias: _tier === 'high' || _tier === 'mid', powerPreference: 'high-performance' });
             renderer.setSize(window.innerWidth, window.innerHeight);
-            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, _tier === 'low' ? 1 : (_tier === 'mid' ? 1.15 : 1.35)));
-            _perfLevel = _tier === 'low' ? 1 : 0;
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, _tier === 'high' ? 1.35 : (_tier === 'ultra' ? 0.7 : 1)));
+            _perfLevel = _tier === 'ultra' ? 3 : (_tier === 'low' ? 1 : 0);
+            _ultraMode = _tier === 'ultra';
+            _frameCapMs = _tier === 'ultra' ? 33.3 : 0;
             if (_tier !== 'high') document.documentElement.classList.add('perf-lite');
-            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.enabled = !_ultraMode;
             renderer.shadowMap.type = THREE.BasicShadowMap;
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
             renderer.toneMappingExposure = 1.15;
@@ -6371,7 +6448,7 @@
 
             const sunLight = new THREE.DirectionalLight(0xfff1d0, 1.45);
             sunLight.position.set(-520, 860, 560);
-            sunLight.castShadow = true;
+            sunLight.castShadow = !_ultraMode;
             sunLight.shadow.mapSize.width = _tier === 'low' ? 512 : 1024;
             sunLight.shadow.mapSize.height = _tier === 'low' ? 512 : 1024;
             sunLight.shadow.bias = -0.0005;
@@ -7753,7 +7830,7 @@
                 scene.add(grassInstancedMesh);
             };
 
-            build3DMeadowGrass();
+            if (!_ultraMode) build3DMeadowGrass();
 
             // Lampu flash permanen (jumlah lampu konstan => tanpa lonjakan kompilasi shader)
             ensureFlashLightPool();
@@ -7801,24 +7878,31 @@
         setTimeout(() => { el.style.opacity = 0; }, 2400);
     }
 
+    const _floatPool = [];
     function spawnFloatText(pos, text, color) {
-        const div = document.createElement('div');
-        div.className = 'dmg-float';
-        div.innerText = text;
+        if (floatTexts.length > 28) return; // batas elemen teks di layar
+        let div = _floatPool.pop();
+        if (!div) {
+            div = document.createElement('div');
+            div.className = 'dmg-float';
+        }
+        div.textContent = text;
         div.style.color = color;
+        div.style.opacity = '1';
         floatingUI.appendChild(div);
-        floatTexts.push({ el: div, pos: pos.clone().add(new THREE.Vector3(0, 38, 0)), life: 0.85 });
+        floatTexts.push({ el: div, pos: new THREE.Vector3(pos.x, pos.y + 38, pos.z), life: 0.85, maxLife: 0.85 });
     }
 
     function spawnBurst(pos, colorHex, count = 18) {
         if (!scene) return;
         const _lowTier = detectPerfTier() === 'low' || _perfLevel >= 2;
-        if (particles.length > (_lowTier ? 80 : 220)) return;
-        if (_lowTier) count = Math.max(4, Math.ceil(count * 0.6));
+        if (particles.length > (_ultraMode ? 30 : (_lowTier ? 80 : 220))) return;
+        if (_ultraMode) count = Math.max(3, Math.ceil(count * 0.35));
+        else if (_lowTier) count = Math.max(4, Math.ceil(count * 0.6));
         const glowTex = getNeonGlowSpriteTexture();
         const origin = pos.clone().add(new THREE.Vector3(0, 15, 0));
 
-        const shockMat = new THREE.MeshBasicMaterial({
+        const shockMat = fxMat({
             color: colorHex,
             transparent: true,
             opacity: 0.78,
@@ -7857,7 +7941,7 @@
             const isStreak = i % 3 !== 0;
             const scaleFactor = 0.65 + Math.random() * 0.85;
 
-            const coreMat = new THREE.MeshBasicMaterial({
+            const coreMat = fxMat({
                 color: 0xffffff,
                 transparent: true,
                 opacity: 0.98,
@@ -7865,7 +7949,7 @@
                 depthWrite: false
             });
 
-            const haloSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+            const haloSprite = new THREE.Sprite(fxSpriteMat({
                 map: glowTex,
                 color: colorHex,
                 transparent: true,
@@ -7875,7 +7959,7 @@
             }));
 
             if (isStreak) {
-                const streakMat = new THREE.MeshBasicMaterial({
+                const streakMat = fxMat({
                     color: colorHex,
                     transparent: true,
                     opacity: 0.92,
@@ -8349,7 +8433,7 @@
                     this.rig.leftLeg.rotation.x = wsin * 0.65 * mb;
                     this.rig.rightLeg.rotation.x = -wsin * 0.65 * mb;
                     this.rig.root.position.y = Math.abs(wsin) * 2.2 * mb + Math.sin(nowSec * 3.0) * 0.25 * (1 - mb);
-                    this.rig.animateCloth(nowSec, mb);
+                    if (!_ultraMode || (_lodFrame & 1) === 0) this.rig.animateCloth(nowSec, mb);
                     const attackSwing = this.attackAnimTimer > 0 ? (this.attackAnimTimer / this.attackAnimDuration) : 0;
                     if (this.rig.archetype === 'kael') {
                         this.rig.applyKaelArcherPose(nowSec, attackSwing);
@@ -8528,7 +8612,7 @@
                 this.rig.rightLeg.rotation.x = -wsin * 0.65 * moveFactor;
                 this.rig.root.position.y = Math.abs(wsin) * 2.2 * moveFactor + Math.sin(nowSec * 3.0) * 0.25 * (1 - moveFactor);
 
-                this.rig.animateCloth(nowSec, moveFactor);
+                if (!_ultraMode || (_lodFrame & 1) === 0) this.rig.animateCloth(nowSec, moveFactor);
 
                 if (this.rig.weaponSpinPart) {
                     this.rig.weaponSpinPart.rotation.y += dt * 3.4;
@@ -11032,12 +11116,12 @@
             this.group.position.copy(this.pos);
             this.group.rotation.y = Math.atan2(dir.x, dir.z);
 
-            const coreWhiteMat = new THREE.MeshBasicMaterial({
+            const coreWhiteMat = fxMat({
                 color: 0xffffff,
                 transparent: true,
                 opacity: 0.98
             });
-            const outerNeonMat = new THREE.MeshBasicMaterial({
+            const outerNeonMat = fxMat({
                 color: neonHex,
                 transparent: true,
                 opacity: 0.95,
@@ -11047,27 +11131,27 @@
 
             if (projKind === 'arrow') {
                 const shaft = new THREE.Mesh(
-                    new THREE.CylinderGeometry(0.45, 0.45, 16, 8),
-                    new THREE.MeshBasicMaterial({ color: 0xffffff })
+                    fxGeo('CylinderGeometry', 0.45, 0.45, 16, 8),
+                    fxMat({ color: 0xffffff })
                 );
                 shaft.rotation.x = Math.PI / 2;
 
-                const arrowHead = new THREE.Mesh(new THREE.ConeGeometry(1.5, 4.2, 4), coreWhiteMat);
+                const arrowHead = new THREE.Mesh(fxGeo('ConeGeometry', 1.5, 4.2, 4), coreWhiteMat);
                 arrowHead.rotation.x = Math.PI / 2;
                 arrowHead.position.z = 9.5;
 
-                const headGlow = new THREE.Mesh(new THREE.ConeGeometry(2.4, 5.6, 4), outerNeonMat);
+                const headGlow = new THREE.Mesh(fxGeo('ConeGeometry', 2.4, 5.6, 4), outerNeonMat);
                 headGlow.rotation.x = Math.PI / 2;
                 headGlow.position.z = 9.5;
 
-                const fletching = new THREE.Mesh(new THREE.BoxGeometry(2.6, 2.6, 3.2), outerNeonMat);
+                const fletching = new THREE.Mesh(fxGeo('BoxGeometry', 2.6, 2.6, 3.2), outerNeonMat);
                 fletching.position.z = -7.2;
 
-                const trailBeam = new THREE.Mesh(new THREE.CylinderGeometry(0.6, 2.6, 22, 8, 1, true), outerNeonMat);
+                const trailBeam = new THREE.Mesh(fxGeo('CylinderGeometry', 0.6, 2.6, 22, 8, 1, true), outerNeonMat);
                 trailBeam.rotation.x = Math.PI / 2;
                 trailBeam.position.z = -12;
 
-                const tipSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+                const tipSprite = new THREE.Sprite(fxSpriteMat({
                     map: glowTex,
                     color: neonHex,
                     transparent: true,
@@ -11080,11 +11164,11 @@
 
                 this.group.add(shaft, arrowHead, headGlow, fletching, trailBeam, tipSprite);
             } else if (isSlash) {
-                const coreBlade = new THREE.Mesh(new THREE.BoxGeometry(22, 2.6, 5.2), coreWhiteMat);
-                const auraBlade = new THREE.Mesh(new THREE.BoxGeometry(28, 6.2, 11.5), outerNeonMat);
+                const coreBlade = new THREE.Mesh(fxGeo('BoxGeometry', 22, 2.6, 5.2), coreWhiteMat);
+                const auraBlade = new THREE.Mesh(fxGeo('BoxGeometry', 28, 6.2, 11.5), outerNeonMat);
                 const trailPlane = new THREE.Mesh(
-                    new THREE.PlaneGeometry(26, 26),
-                    new THREE.MeshBasicMaterial({
+                    fxGeo('PlaneGeometry', 26, 26),
+                    fxMat({
                         map: glowTex,
                         color: neonHex,
                         transparent: true,
@@ -11098,12 +11182,12 @@
                 trailPlane.position.z = -6;
                 this.group.add(coreBlade, auraBlade, trailPlane);
             } else {
-                const coreOrb = new THREE.Mesh(new THREE.SphereGeometry(3.2, 10, 10), coreWhiteMat);
-                const haloOrb = new THREE.Mesh(new THREE.SphereGeometry(5.8, 12, 12), outerNeonMat);
-                const wakeCone = new THREE.Mesh(new THREE.ConeGeometry(4.6, 18, 10, 1, true), outerNeonMat);
+                const coreOrb = new THREE.Mesh(fxGeo('SphereGeometry', 3.2, 10, 10), coreWhiteMat);
+                const haloOrb = new THREE.Mesh(fxGeo('SphereGeometry', 5.8, 12, 12), outerNeonMat);
+                const wakeCone = new THREE.Mesh(fxGeo('ConeGeometry', 4.6, 18, 10, 1, true), outerNeonMat);
                 wakeCone.rotation.x = -Math.PI / 2;
                 wakeCone.position.z = -9;
-                const orbSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+                const orbSprite = new THREE.Sprite(fxSpriteMat({
                     map: glowTex,
                     color: neonHex,
                     transparent: true,
@@ -11139,7 +11223,7 @@
                     }
                 }
             }
-            if (this.life <= 0) { scene.remove(this.group); disposeGeometries(this.group); }
+            if (this.life <= 0) { scene.remove(this.group); disposeGeometries(this.group); releaseFx(this.group); }
         }
     }
 
@@ -13278,36 +13362,96 @@
 
     // Pengatur kualitas adaptif: hanya aktif pada perangkat yang benar-benar lambat
     let _perfAcc = 0, _perfFrames = 0, _perfLevel = 0, _frameNo = 0, _lastClockSec = -1, _clockEl = null, _lodFrame = 0;
-    function perfGovernor(rawMs) {
+    // Layar diagnostik: ketuk jam pertandingan 5x cepat (atau tekan F3) -> tampil FPS, draw call, dsb.
+    let _diagEl = null, _diagOn = false, _diagAcc = 0, _diagFrames = 0, _diagMsAcc = 0, _diagClicks = [];
+    function diagToggle() {
+        _diagOn = !_diagOn;
+        if (_diagOn && !_diagEl) {
+            _diagEl = document.createElement('div');
+            _diagEl.style.cssText = 'position:fixed;left:6px;bottom:6px;z-index:9999;pointer-events:none;font:600 10px/1.35 monospace;color:#b9f6ca;background:rgba(0,0,0,0.62);padding:4px 7px;border-radius:6px;white-space:pre;';
+            document.body.appendChild(_diagEl);
+        }
+        if (_diagEl) _diagEl.style.display = _diagOn ? 'block' : 'none';
+    }
+    function diagTick(rawMs) {
+        if (!_diagOn || !_diagEl) return;
+        _diagAcc += rawMs; _diagFrames++; _diagMsAcc += _lastWorkMs;
+        if (_diagAcc < 500) return;
+        const fps = Math.round(_diagFrames * 1000 / _diagAcc);
+        const info = renderer ? renderer.info : null;
+        _diagEl.textContent =
+            `FPS ${fps} | ${(_diagAcc / _diagFrames).toFixed(1)} ms (kerja ${(_diagMsAcc / _diagFrames).toFixed(1)} ms)\n` +
+            `Level ${_perfLevel}/4 | ${detectPerfTier()} | DPR ${renderer ? renderer.getPixelRatio().toFixed(2) : '-'}\n` +
+            (info ? `Draw ${info.render.calls} | Tri ${(info.render.triangles / 1000).toFixed(0)}k | Geo ${info.memory.geometries} | Tex ${info.memory.textures}\n` : '') +
+            `Ent ${entities.length} | Part ${particles.length} | VFX ${attackVfxList.length} | Proj ${projectiles.length}`;
+        _diagAcc = 0; _diagFrames = 0; _diagMsAcc = 0;
+    }
+    window.addEventListener('keydown', (e) => { if (e.key === 'F3') { e.preventDefault(); diagToggle(); } });
+    document.addEventListener('click', (e) => {
+        if (!e.target || e.target.id !== 'clock-text') return;
+        const t = performance.now();
+        _diagClicks = _diagClicks.filter(x => t - x < 3000);
+        _diagClicks.push(t);
+        if (_diagClicks.length >= 5) { _diagClicks = []; diagToggle(); }
+    });
+
+    let _perfWork = 0, _perfSq = 0, _lastWorkMs = 0, _frameT0 = 0;
+    function applyPerfLevel() {
+        document.documentElement.classList.add('perf-lite');
+        if (!renderer) return;
+        const dpr = _perfLevel === 2 ? Math.min(1, renderer.getPixelRatio())
+            : (_perfLevel === 3 ? 0.85 : (_perfLevel >= 4 ? 0.7 : renderer.getPixelRatio()));
+        if (_perfLevel >= 2 && Math.abs(dpr - renderer.getPixelRatio()) > 0.001) {
+            renderer.setPixelRatio(dpr);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        if (_perfLevel >= 3 && !_frameCapMs) _frameCapMs = 33.3; // ritme stabil 30 FPS lebih mulus daripada 20-40 FPS yang naik turun
+        if (_perfLevel >= 4 && !_ultraMode) enterUltraModeLive();
+    }
+    // Mode sangat rendah saat game berjalan: bayangan, lampu dinamis, dan rumput dimatikan
+    function enterUltraModeLive() {
+        _ultraMode = true;
+        try {
+            scene.traverse(o => {
+                if (o.isDirectionalLight) o.castShadow = false;
+                if (o.isPointLight) o.visible = false;
+            });
+            if (grassInstancedMesh) grassInstancedMesh.visible = false;
+            resetFlashLightPool();
+        } catch (e) {}
+    }
+    // Pengatur kualitas adaptif: bereaksi dalam ~1,8 detik bila FPS < ~47; tidak bereaksi bila perangkat hanya dibatasi 30 Hz (hemat daya)
+    function perfGovernor(rawMs, workMs) {
         if (rawMs > 250) return; // abaikan jeda (pindah tab / hitch tunggal)
         _perfAcc += rawMs;
+        _perfWork += workMs;
+        _perfSq += rawMs * rawMs;
         _perfFrames++;
-        if (_perfAcc < 2500) return;
+        if (_perfAcc < 1800) return;
         const avg = _perfAcc / _perfFrames;
-        _perfAcc = 0;
-        _perfFrames = 0;
-        if (renderer && ((avg > 26 && _perfLevel < 2) || (avg > 40 && _perfLevel === 2))) {
+        const work = _perfWork / _perfFrames;
+        const std = Math.sqrt(Math.max(0, _perfSq / _perfFrames - avg * avg));
+        _perfAcc = 0; _perfWork = 0; _perfSq = 0; _perfFrames = 0;
+        const capped30 = Math.abs(avg - 33.3) < 3 && std < 4 && work < 9;
+        if (capped30) return;
+        if (renderer && avg > 21 && _perfLevel < 4) {
             _perfLevel++;
-            document.documentElement.classList.add('perf-lite');
-            if (_perfLevel === 2) {
-                renderer.setPixelRatio(Math.min(1, renderer.getPixelRatio()));
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            } else if (_perfLevel === 3) {
-                renderer.setPixelRatio(0.8);
-                renderer.setSize(window.innerWidth, window.innerHeight);
-            }
+            applyPerfLevel();
         }
     }
 
     function loop(now) {
         if (gameState === 0 || gameState === 3) { _loopActive = false; return; }
         requestAnimationFrame(loop);
+        if (_frameCapMs && now - _lastStepTs < _frameCapMs - 2) return; // lewati frame: ritme tetap stabil
+        _lastStepTs = now;
 
         const rawMs = now - lastTime;
         const dt = Math.min(0.05, rawMs / 1000);
         const nowSec = now * 0.001;
         lastTime = now;
-        perfGovernor(rawMs);
+        perfGovernor(rawMs, _lastWorkMs);
+        _frameT0 = performance.now();
         _lodFrame++;
 
         if (riverMat) riverMat.emissiveIntensity = 0.44 + Math.sin(now * 0.004) * 0.14;
@@ -13416,7 +13560,7 @@
             minimapRedrawTimer -= dt;
             if (minimapRedrawTimer <= 0) {
                 drawMinimap();
-                minimapRedrawTimer = 0.1;
+                minimapRedrawTimer = _perfLevel >= 2 ? 0.25 : 0.1;
             }
         } else if (gameState === 2) {
             quizTimer -= dt;
@@ -13466,6 +13610,7 @@
                 if (vfx.life <= 0) {
                     scene.remove(vfx.mesh);
                     disposeGeometries(vfx.mesh);
+                    releaseFx(vfx.mesh);
                     attackVfxList.splice(i, 1);
                 }
             } else if (vfx.kind === 'magma_fist') {
@@ -13485,6 +13630,7 @@
                 if (vfx.life <= 0) {
                     scene.remove(vfx.mesh);
                     disposeGeometries(vfx.mesh);
+                    releaseFx(vfx.mesh);
                     attackVfxList.splice(i, 1);
                 }
             } else {
@@ -13498,6 +13644,7 @@
                 if (vfx.life <= 0) {
                     scene.remove(vfx.mesh);
                     disposeGeometries(vfx.mesh);
+                    releaseFx(vfx.mesh);
                     attackVfxList.splice(i, 1);
                 }
             }
@@ -13508,6 +13655,7 @@
             p.life -= dt;
             if (p.life <= 0) {
                 scene.remove(p.mesh);
+                releaseFx(p.mesh);
                 particles.splice(i, 1);
                 continue;
             }
@@ -13543,9 +13691,15 @@
             const f = floatTexts[i];
             f.life -= dt;
             const sp = _tmpV2.copy(f.pos).project(camera);
-            f.el.style.left = `${(sp.x * 0.5 + 0.5) * window.innerWidth}px`;
-            f.el.style.top = `${(sp.y * -0.5 + 0.5) * window.innerHeight}px`;
-            if (f.life <= 0) { f.el.remove(); floatTexts.splice(i, 1); }
+            const fp = Math.min(1, Math.max(0, 1 - f.life / f.maxLife));
+            const fe = 1 - Math.pow(1 - fp, 1.6); // ease-out seperti animasi sebelumnya
+            const fs = fe < 0.25 ? 0.7 + 0.45 * (fe / 0.25) : 1.15 - 0.2 * ((fe - 0.25) / 0.75);
+            const fy = fe < 0.25 ? -30 - 50 * (fe / 0.25) : -80 - 60 * ((fe - 0.25) / 0.75);
+            const fx = Math.round((sp.x * 0.5 + 0.5) * window.innerWidth * 10) / 10;
+            const fyp = Math.round((sp.y * -0.5 + 0.5) * window.innerHeight * 10) / 10;
+            f.el.style.transform = `translate3d(${fx}px, ${fyp}px, 0) translate(-50%, ${fy.toFixed(1)}%) scale(${fs.toFixed(3)})`;
+            f.el.style.opacity = (1 - fp).toFixed(3);
+            if (f.life <= 0) { f.el.remove(); _floatPool.push(f.el); floatTexts.splice(i, 1); }
         }
 
         if (renderer && scene && camera) {
@@ -13557,6 +13711,8 @@
             }
             renderer.render(scene, camera);
         }
+        _lastWorkMs = performance.now() - _frameT0;
+        diagTick(rawMs);
     }
 
     // Tab disembunyikan: hentikan BGM & suspend audio agar tidak boros baterai/CPU
