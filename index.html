@@ -1604,6 +1604,11 @@
         .hp-wrap, .hero-overhead-badge { backdrop-filter: none !important; -webkit-backdrop-filter: none !important; }
         /* Perangkat sedang/lemah (atau saat FPS turun): blur latar HUD & soal dimatikan (sangat berat di atas kanvas yang bergerak) */
         #clock-text { pointer-events: auto; }
+        /* Kolom ketik: boleh diketuk/difokus di semua browser HP, dan tidak tertutup keyboard layar */
+        input, textarea, select, label { touch-action: manipulation; }
+        .kb-open .overlay { bottom: auto; height: var(--vvh, 100%); }
+        .kb-open #start-screen .inline-flex, .kb-open #start-screen button { display: none !important; }
+
         #quality-select option { background: #0f172a; color: #ffffff; }
         .perf-lite #hud, .perf-lite #hud *,
         .perf-lite #quiz-screen, .perf-lite #quiz-screen *,
@@ -1649,18 +1654,21 @@
 
             <div class="flex flex-col items-center max-w-2xl px-2">
                 <!-- Input Nama Player & Hero Aktif -->
-                <div class="mt-5 flex flex-col sm:flex-row items-center justify-center gap-2.5 w-full max-w-lg">
-                    <div class="flex items-center gap-2 rounded-full border border-cyan-400/60 bg-slate-950/90 px-4 py-1.5 w-full sm:w-auto flex-1">
-                        <span class="text-xs font-extrabold text-cyan-300 whitespace-nowrap">👤 Nama Player:</span>
-                        <input id="home-player-name-input" type="text" maxlength="20" placeholder="Nama Pemain..."
+                <div class="mt-5 flex flex-wrap items-center justify-center gap-2.5 w-full max-w-3xl">
+                    <label class="flex items-center gap-2 rounded-full border border-cyan-400/60 bg-slate-950/90 px-4 cursor-text" style="flex: 0 0 auto; width: 250px; max-width: 100%; min-height: 38px;">
+                        <span class="text-xs font-extrabold text-cyan-300 whitespace-nowrap">👤 Nama:</span>
+                        <input id="home-player-name-input" type="text" maxlength="20" placeholder="Ketik nama kamu..."
+                            inputmode="text" enterkeyhint="done" autocomplete="off" autocapitalize="words" spellcheck="false"
                             oninput="setPlayerDisplayName(this.value)"
-                            class="w-full bg-transparent text-xs sm:text-sm font-extrabold text-white outline-none placeholder:text-slate-500" />
-                    </div>
-                    <div class="inline-flex items-center gap-2 rounded-full border border-amber-400/50 bg-slate-900/90 px-4 py-2 text-xs font-bold text-amber-200 shadow-inner whitespace-nowrap">
+                            onkeydown="if(event.key==='Enter'){this.blur();}"
+                            class="w-full min-w-0 bg-transparent font-extrabold text-white outline-none placeholder:text-slate-500"
+                            style="font-size:16px; min-height:24px;" />
+                    </label>
+                    <div class="inline-flex items-center gap-2 rounded-full border border-amber-400/50 bg-slate-900/90 px-4 text-xs font-bold text-amber-200 shadow-inner whitespace-nowrap" style="min-height: 38px;">
                         <span>Hero:</span>
                         <span id="home-selected-hero-badge" class="font-cinzel font-black text-cyan-300">⚔️ AETHER</span>
                     </div>
-                    <label class="inline-flex items-center gap-2 rounded-full border border-emerald-400/50 bg-slate-900/90 px-3 py-1.5 text-xs font-bold text-emerald-200 shadow-inner whitespace-nowrap">
+                    <label class="inline-flex items-center gap-2 rounded-full border border-emerald-400/50 bg-slate-900/90 px-3 text-xs font-bold text-emerald-200 shadow-inner whitespace-nowrap" style="min-height: 38px;">
                         <span>🎮 Grafis:</span>
                         <select id="quality-select" onchange="setQualityPreference(this.value)" class="bg-transparent font-extrabold text-white outline-none">
                             <option value="auto">Otomatis</option>
@@ -5482,6 +5490,32 @@
     // ===== OPTIMASI PERANGKAT: deteksi tingkat perangkat & penggabungan mesh dunia statis =====
     let _perfTier = null;
     let _ultraMode = false, _frameCapMs = 0, _lastStepTs = 0;
+    // Keyboard layar HP: overlay mengikuti area yang terlihat agar kolom ketik tidak tertutup
+    (function initKeyboardAware() {
+        const vv = window.visualViewport;
+        if (!vv) return;
+        const root = document.documentElement;
+        const update = () => {
+            const diff = window.innerHeight - vv.height;
+            if (diff > 120) {
+                root.style.setProperty('--vvh', Math.round(vv.height) + 'px');
+                root.classList.add('kb-open');
+            } else {
+                root.style.removeProperty('--vvh');
+                root.classList.remove('kb-open');
+            }
+        };
+        vv.addEventListener('resize', update);
+        vv.addEventListener('scroll', update);
+        document.addEventListener('focusin', (e) => {
+            const t = e.target;
+            if (t && t.tagName === 'INPUT') {
+                setTimeout(() => { try { t.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (err) {} }, 320);
+            }
+        });
+        document.addEventListener('focusout', () => setTimeout(update, 200));
+    })();
+
     function getQualityPreference() {
         try { return localStorage.getItem('edu_quality') || 'auto'; } catch (e) { return 'auto'; }
     }
